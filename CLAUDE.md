@@ -29,8 +29,9 @@ fields or indexes, update `schema.md` in the same PR.
   stage — security rules read `parentUids` directly via `get()`.
 - **Storage:** Firebase Storage. Rules in `storage.rules`.
 - **Hosting:** Firebase Hosting (web simulator destination, post-Phase 5).
-- **Two projects:** `mom-bucks-staging` (default alias) and
-  `mom-bucks-prod`. See `.firebaserc`. Provisioning is tracked in
+- **Two projects:** `mom-bucks-dev-b3772` (alias `dev`, also `default`) and
+  `mom-bucks-prod-81096` (alias `prod`). See `.firebaserc`. Blaze upgrade
+  + budget alerts are tracked in
   [issue #2](https://github.com/atbrew/mom-bucks-backend/issues/2).
 
 ## Local-first workflow
@@ -114,7 +115,7 @@ emulator. They live alongside Functions tests under `functions/test/`.
 - Don't reach across to `atbrew/mom-bucks` and edit Flask code from this
   repo. Coordinate via the schema doc; let the API Developer / Android
   Developer in that repo make their own changes.
-- Don't deploy to `mom-bucks-prod` without an approved PR + show-and-tell.
+- Don't deploy to `mom-bucks-prod-81096` without an approved PR + show-and-tell.
 
 ## Open issue labels
 

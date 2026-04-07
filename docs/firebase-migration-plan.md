@@ -252,7 +252,7 @@ Each phase ships independently and leaves the app working end-to-end. Use the st
 
 - Create the `atbrew/mom-bucks-backend` repo with the layout above.
 
-- Create Firebase projects `mom-bucks-prod` and `mom-bucks-staging`, enable Firestore, Auth, Storage, Hosting, Functions.
+- Create Firebase projects `mom-bucks-prod` and `mom-bucks-dev` (provisioned as `mom-bucks-prod-81096` and `mom-bucks-dev-b3772` after GCP suffixing), enable Firestore, Auth, Storage, Hosting, Functions.
 
 - Upgrade to Blaze, set a $10/month budget alert.
 

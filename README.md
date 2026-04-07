@@ -71,14 +71,13 @@ npm test
 Two Firebase projects are aliased in `.firebaserc`:
 
 ```bash
-firebase use staging   # mom-bucks-staging
-firebase use prod      # mom-bucks-prod
+firebase use dev    # mom-bucks-dev-b3772
+firebase use prod   # mom-bucks-prod-81096
 firebase deploy
 ```
 
-Project provisioning, Blaze upgrade, and budget alerts are tracked in
-[issue #2](https://github.com/atbrew/mom-bucks-backend/issues/2). Until that
-lands, the project IDs in `.firebaserc` are placeholders.
+Blaze upgrade, service enablement, and budget alerts are tracked in
+[issue #2](https://github.com/atbrew/mom-bucks-backend/issues/2).
 
 ## Status
 

@@ -31,6 +31,6 @@ mkdir -p "$EMULATOR_DATA_DIR"
 
 echo "[start-emulators] booting suite (UI: http://localhost:4000)"
 exec firebase emulators:start \
-  --project "${FIREBASE_PROJECT:-mom-bucks-staging}" \
+  --project "${FIREBASE_PROJECT:-mom-bucks-dev-b3772}" \
   --import "$EMULATOR_DATA_DIR" \
   --export-on-exit "$EMULATOR_DATA_DIR"
