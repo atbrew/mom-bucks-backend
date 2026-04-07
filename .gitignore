@@ -1,0 +1,36 @@
+# Dependencies
+node_modules/
+
+# Build output
+functions/lib/
+functions/coverage/
+*.tsbuildinfo
+
+# Firebase
+.firebase/
+firebase-debug.log
+firestore-debug.log
+ui-debug.log
+pubsub-debug.log
+database-debug.log
+.runtimeconfig.json
+
+# Emulator state — exported via --export-on-exit, never commit
+.emulator-data/
+
+# Service account credentials — never commit
+serviceAccount*.json
+*-firebase-adminsdk-*.json
+.env
+.env.local
+.env.*.local
+
+# OS
+.DS_Store
+Thumbs.db
+
+# Editors
+.idea/
+.vscode/
+*.swp
+*.swo

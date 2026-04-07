@@ -528,5 +528,5 @@ Note: this phase touches `atbrew/mom-bucks` only. `mom-bucks-backend` is not yet
 
 - **Region:** `us-central1`, confirmed as matching current GCP region — no change needed.
 
-- **Plan document location:** This plan will be copied into `mom-bucks-backend/docs/firebase-migration-plan.md` once that repo exists (Phase 0).
+- **Plan document location:** This plan lives at `mom-bucks-backend/docs/firebase-migration-plan.md` as of Phase 0 bootstrap.
 

@@ -1,0 +1,7 @@
+{
+  "projects": {
+    "default": "mom-bucks-staging",
+    "staging": "mom-bucks-staging",
+    "prod": "mom-bucks-prod"
+  }
+}
