@@ -100,8 +100,10 @@ emulator. They live alongside Functions tests under `functions/test/`.
 - `functions/src/` — TypeScript Cloud Functions source.
 - `functions/test/` — Vitest unit tests + rules unit tests.
 - `scripts/start-emulators.sh` — local emulator entrypoint.
-- `scripts/firestore-backfill.ts` — Postgres → Firestore migration
-  (issue #12, Phase 2).
+- `scripts/run-rules-tests.sh` — `npm run test:rules` wrapper (auto-discovers JDK 21+).
+- `functions/src/backfill/` — Postgres → Firestore migration (issue #12, Phase 2).
+  `transform.ts` holds the pure logic, `runBackfill.ts` the orchestration,
+  `cli.ts` the `npm run backfill` entry point. See `docs/migration-runbook.md`.
 - `docs/firebase-migration-plan.md` — phased migration plan.
 - `docs/schema.md` — collection layout source of truth.
 

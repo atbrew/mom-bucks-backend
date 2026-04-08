@@ -142,11 +142,12 @@ is ~€90 trillion, so we will never overflow at this app's scale.
 
 The existing Postgres schema uses `Numeric(10, 2)` for money (see
 `mom-bucks/web-app/src/mombucks/models/{child,transaction,vault,activity}.py`).
-The backfill script in #12 converts every such column to integer cents
-by multiplying by 100 and rounding to the nearest integer:
+The backfill script at `functions/src/backfill/` converts every such
+column to integer cents by multiplying by 100 and rounding to the
+nearest integer:
 
 ```ts
-// scripts/firestore-backfill.ts
+// functions/src/backfill/transform.ts — toCents()
 const cents = Math.round(Number(row.balance) * 100);
 ```
 
