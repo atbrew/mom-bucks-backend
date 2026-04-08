@@ -1,12 +1,5 @@
 import { onRequest } from "firebase-functions/v2/https";
-import { initializeApp, getApps } from "firebase-admin/app";
-import { getFirestore, FieldValue } from "firebase-admin/firestore";
-
-// Ensure the Admin SDK is initialised exactly once. Other handlers that land
-// later (Phase 4) will reuse this guard.
-if (getApps().length === 0) {
-  initializeApp();
-}
+import { getFirestore, FieldValue } from "./admin";
 
 /**
  * helloWorld — permanent health probe / end-to-end smoke test.

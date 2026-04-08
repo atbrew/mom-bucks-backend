@@ -1,10 +1,10 @@
 import { beforeEach, describe, expect, it, vi } from "vitest";
 
-// Stub firebase-admin before the helloWorld module is loaded. The handler
-// calls initializeApp() at module load and getFirestore() inside the
-// request handler — both need to be noops in unit tests so we don't need
-// a real emulator running. The real Firestore plumbing is exercised by
-// the post-deploy live curl smoke test documented in issue #8.
+// Stub `src/admin` before the helloWorld module is loaded. The handler
+// calls getFirestore() inside the request handler — it needs to be a
+// noop in unit tests so we don't need a real emulator running. The
+// real Firestore plumbing is exercised by the post-deploy live curl
+// smoke test documented in issue #8.
 //
 // Spies live inside `vi.hoisted(...)` because `vi.mock(...)` is hoisted
 // above `const` declarations at runtime — referencing a plain `const`
@@ -21,12 +21,7 @@ const { setSpy, docSpy, collectionSpy, getFirestoreMock } = vi.hoisted(() => {
   return { setSpy, docSpy, collectionSpy, getFirestoreMock };
 });
 
-vi.mock("firebase-admin/app", () => ({
-  initializeApp: vi.fn(),
-  getApps: vi.fn().mockReturnValue([]),
-}));
-
-vi.mock("firebase-admin/firestore", () => ({
+vi.mock("../src/admin", () => ({
   getFirestore: getFirestoreMock,
   FieldValue: {
     serverTimestamp: vi.fn().mockReturnValue("__SERVER_TIMESTAMP__"),
