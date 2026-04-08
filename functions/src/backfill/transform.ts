@@ -43,6 +43,12 @@ export interface PgUser {
    * references them as a parent).
    */
   firebase_uid: string | null;
+  /**
+   * Original signup timestamp. Carried through verbatim to
+   * `users/{uid}.createdAt` so the historical signup order survives
+   * the migration.
+   */
+  created_at: Date;
 }
 
 export interface PgChild {
@@ -329,7 +335,9 @@ export function transformUser(row: PgUser): FirestoreUser {
     photoUrl: null,
     fcmTokens: [],
     timezone: row.timezone,
-    createdAt: new Date(),
+    // Preserve the original signup time from Postgres so the historical
+    // ordering (and any analytics derived from it) survives the move.
+    createdAt: row.created_at,
   };
 }
 
@@ -440,16 +448,31 @@ export function pickVaultBalanceCents(vaults: PgVault[]): number {
  *
  * The Postgres schema has one child per invite; Firestore uses
  * `childIds: string[]` so future multi-child invites are native.
+ *
+ * Expiry is computed as `row.created_at + lifetimeDays`, NOT
+ * `now + lifetimeDays` — an invite that was created six months ago
+ * has earned its grave and should not be resurrected with a fresh
+ * 14-day lease at backfill time. If the derived expiresAt is already
+ * in the past, the invite is treated as stale and skipped (returns
+ * null).
  */
 export function transformInvite(
   row: PgFamilyInvite,
   invitedByUid: string | undefined,
-  expiresAt: Date,
+  lifetimeDays: number,
+  now: Date,
 ): FirestoreInvite | null {
   if (row.status !== "PENDING") return null;
   if (!invitedByUid) {
     // inviter has no firebase_uid — skip, we can't represent this
     // invite without a valid Firebase identity.
+    return null;
+  }
+  const lifetimeMs = lifetimeDays * 24 * 60 * 60 * 1000;
+  const expiresAt = new Date(row.created_at.getTime() + lifetimeMs);
+  if (expiresAt.getTime() <= now.getTime()) {
+    // Original lifetime has already elapsed. Don't port it — the
+    // inviter can re-invite if they still want to co-parent.
     return null;
   }
   return {

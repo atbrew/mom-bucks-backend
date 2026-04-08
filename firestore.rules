@@ -78,12 +78,16 @@ service cloud.firestore {
       allow read: if isSignedIn()
                   && request.auth.uid in resource.data.parentUids;
 
-      // CREATE — the caller MUST include their own uid in `parentUids`.
-      // Prevents anyone from creating a child they can't themselves
-      // access (which would be a useless but messy state to clean up).
+      // CREATE — the caller creates the child with ONLY their own uid
+      // in `parentUids`. Every subsequent co-parent must be added via
+      // the acceptInvite (#13) callable. This closes a loophole where
+      // a client could otherwise seed `parentUids: [me, victim]` at
+      // creation time and grant access to an unrelated user without
+      // going through the invite flow.
       allow create: if isSignedIn()
-                    && request.auth.uid in request.resource.data.parentUids
-                    && request.resource.data.parentUids.size() >= 1;
+                    && request.resource.data.parentUids is list
+                    && request.resource.data.parentUids.size() == 1
+                    && request.resource.data.parentUids[0] == request.auth.uid;
 
       // UPDATE — any current parent can update the child, BUT cannot
       // directly mutate `parentUids`. Membership changes go through

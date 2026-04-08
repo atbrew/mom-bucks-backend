@@ -209,6 +209,23 @@ describe("children/{childId}", () => {
       );
     });
 
+    it("denies creating a child with MULTIPLE parentUids (must go through acceptInvite)", async () => {
+      // Closes the loophole where a client could seed
+      // parentUids: [me, victim] at create time and grant access to
+      // an unrelated user without going through the invite flow.
+      const alice = env.authenticatedContext("alice").firestore();
+      await assertFails(
+        setDoc(doc(alice, "children/sam"), {
+          name: "Sam",
+          balance: 0,
+          vaultBalance: 0,
+          parentUids: ["alice", "bob"],
+          createdByUid: "alice",
+          version: 1,
+        }),
+      );
+    });
+
     it("denies unauthenticated creates", async () => {
       const anon = env.unauthenticatedContext().firestore();
       await assertFails(

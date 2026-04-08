@@ -64,6 +64,7 @@ describe("buildUserIdToUidMap", () => {
       name: "Alice",
       timezone: "Europe/Dublin",
       firebase_uid: "fb-alice",
+      created_at: new Date("2024-01-01T00:00:00Z"),
     };
     const bob: PgUser = {
       id: "u-bob",
@@ -71,6 +72,7 @@ describe("buildUserIdToUidMap", () => {
       name: "Bob",
       timezone: null,
       firebase_uid: "fb-bob",
+      created_at: new Date("2024-02-01T00:00:00Z"),
     };
     const unmigrated: PgUser = {
       id: "u-charlie",
@@ -78,6 +80,7 @@ describe("buildUserIdToUidMap", () => {
       name: "Charlie",
       timezone: null,
       firebase_uid: null,
+      created_at: new Date("2024-03-01T00:00:00Z"),
     };
 
     const m = buildUserIdToUidMap([alice, bob, unmigrated]);
@@ -108,6 +111,7 @@ describe("computeParentUidsByChild", () => {
       name: "Alice",
       timezone: null,
       firebase_uid: "fb-alice",
+      created_at: new Date("2024-01-01T00:00:00Z"),
     },
     {
       id: "u-bob",
@@ -115,6 +119,7 @@ describe("computeParentUidsByChild", () => {
       name: "Bob",
       timezone: null,
       firebase_uid: "fb-bob",
+      created_at: new Date("2024-02-01T00:00:00Z"),
     },
     {
       id: "u-carol",
@@ -122,6 +127,7 @@ describe("computeParentUidsByChild", () => {
       name: "Carol",
       timezone: null,
       firebase_uid: "fb-carol",
+      created_at: new Date("2024-03-01T00:00:00Z"),
     },
   ];
 
@@ -228,6 +234,7 @@ describe("computeParentUidsByChild", () => {
       name: "Dave",
       timezone: null,
       firebase_uid: null,
+      created_at: new Date("2024-04-01T00:00:00Z"),
     };
     const fmDave: PgFamilyMember = {
       id: "fm-dave",
@@ -291,6 +298,7 @@ describe("transformUser", () => {
       name: "Alice",
       timezone: "Europe/Dublin",
       firebase_uid: "fb-alice",
+      created_at: new Date("2024-01-15T12:34:56Z"),
     };
     const out = transformUser(u);
     expect(out.displayName).toBe("Alice");
@@ -300,6 +308,22 @@ describe("transformUser", () => {
     expect(out.fcmTokens).toEqual([]);
   });
 
+  it("preserves the source created_at (does not reset to now)", () => {
+    // Gemini's #5 finding — historical signup time must survive the
+    // migration so analytics derived from it don't collapse.
+    const original = new Date("2023-06-01T09:00:00Z");
+    const u: PgUser = {
+      id: "u-alice",
+      email: "alice@test.com",
+      name: "Alice",
+      timezone: null,
+      firebase_uid: "fb-alice",
+      created_at: original,
+    };
+    const out = transformUser(u);
+    expect(out.createdAt).toEqual(original);
+  });
+
   it("throws MISSING_FIREBASE_UID when firebase_uid is null", () => {
     const u: PgUser = {
       id: "u-charlie",
@@ -307,6 +331,7 @@ describe("transformUser", () => {
       name: "Charlie",
       timezone: null,
       firebase_uid: null,
+      created_at: new Date(),
     };
     expect(() => transformUser(u)).toThrowError(BackfillError);
     try {
@@ -542,22 +567,44 @@ describe("pickVaultBalanceCents", () => {
 // ─── transformInvite ────────────────────────────────────────────────
 
 describe("transformInvite", () => {
-  const expiresAt = new Date("2026-12-31");
+  const LIFETIME_DAYS = 14;
+  const NOW = new Date("2026-04-08T12:00:00Z");
 
-  it("ports a PENDING invite with a single childIds entry", () => {
+  it("computes expiresAt as row.created_at + lifetimeDays (not now + lifetime)", () => {
+    // Gemini's #4 finding — an invite created 6 days ago should have 8
+    // days left, not a fresh 14-day lease.
+    const createdAt = new Date("2026-04-02T12:00:00Z"); // 6 days before NOW
     const row: PgFamilyInvite = {
-      id: "fi-1",
+      id: "fi-recent",
       child_id: "c-sam",
       invited_by: "u-alice",
       invitee_email: "bob@test.com",
       status: "PENDING",
-      created_at: new Date(),
+      created_at: createdAt,
     };
-    const out = transformInvite(row, "fb-alice", expiresAt)!;
+    const out = transformInvite(row, "fb-alice", LIFETIME_DAYS, NOW)!;
+    const expected = new Date(
+      createdAt.getTime() + LIFETIME_DAYS * 24 * 60 * 60 * 1000,
+    );
+    expect(out.expiresAt).toEqual(expected);
     expect(out.childIds).toEqual(["c-sam"]);
     expect(out.invitedByUid).toBe("fb-alice");
     expect(out.invitedEmail).toBe("bob@test.com");
     expect(out.acceptedByUid).toBeNull();
+  });
+
+  it("skips a PENDING invite whose derived expiresAt is already in the past", () => {
+    // Gemini's #4 finding — an invite from 6 months ago has earned its
+    // grave; the backfill shouldn't resurrect it with a fresh lease.
+    const row: PgFamilyInvite = {
+      id: "fi-stale",
+      child_id: "c-sam",
+      invited_by: "u-alice",
+      invitee_email: "bob@test.com",
+      status: "PENDING",
+      created_at: new Date("2025-10-01T00:00:00Z"), // ~6 months before NOW
+    };
+    expect(transformInvite(row, "fb-alice", LIFETIME_DAYS, NOW)).toBeNull();
   });
 
   it("returns null for ACCEPTED invites (historical, not ported)", () => {
@@ -567,9 +614,9 @@ describe("transformInvite", () => {
       invited_by: "u-alice",
       invitee_email: "bob@test.com",
       status: "ACCEPTED",
-      created_at: new Date(),
+      created_at: NOW,
     };
-    expect(transformInvite(row, "fb-alice", expiresAt)).toBeNull();
+    expect(transformInvite(row, "fb-alice", LIFETIME_DAYS, NOW)).toBeNull();
   });
 
   it("returns null when inviter has no firebase_uid", () => {
@@ -579,9 +626,9 @@ describe("transformInvite", () => {
       invited_by: "u-ghost",
       invitee_email: "bob@test.com",
       status: "PENDING",
-      created_at: new Date(),
+      created_at: NOW,
     };
-    expect(transformInvite(row, undefined, expiresAt)).toBeNull();
+    expect(transformInvite(row, undefined, LIFETIME_DAYS, NOW)).toBeNull();
   });
 });
 
