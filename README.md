@@ -62,6 +62,7 @@ State is persisted between runs in `.emulator-data/` (gitignored), via
 ```bash
 cd functions
 npm run lint
+npm run typecheck
 npm run build
 npm test
 ```

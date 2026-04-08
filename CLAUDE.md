@@ -61,7 +61,8 @@ The emulator UI is at <http://localhost:4000>. Emulator state persists in
 | Command                              | What it does                          |
 |--------------------------------------|---------------------------------------|
 | `cd functions && npm run lint`       | ESLint over `src/` and `test/`        |
-| `cd functions && npm run build`      | `tsc` strict-mode compile             |
+| `cd functions && npm run typecheck`  | `tsc --noEmit -p tsconfig.test.json` — strict-mode type check that includes `test/` (the main `tsconfig.json` excludes tests so the `build` output stays clean) |
+| `cd functions && npm run build`      | `tsc` strict-mode compile of `src/` → `lib/` |
 | `cd functions && npm test`           | Vitest (unit + rules-unit-testing)    |
 | `firebase emulators:exec "<cmd>"`    | Boot emulators, run cmd, tear down    |
 

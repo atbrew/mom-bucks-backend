@@ -58,10 +58,10 @@ single `array-contains` query can power the home screen for any parent.
 |-------------------|-------------------------|----------------------------------------------------------------------------------------------------------------------|
 | `name`            | `string`                | Child's display name.                                                                                                |
 | `photoUrl`        | `string \| null`        | Path in Storage.                                                                                                     |
-| `balance`         | `number`                | Spendable balance. Maintained by `onTransactionCreate` (#15).                                                        |
-| `vaultBalance`    | `number`                | Locked / saving balance.                                                                                             |
+| `balance`         | `integer`               | Spendable balance **in cents** (e.g. `1250` = €12.50). See "Monetary values" below. Maintained by `onTransactionCreate` (#15). |
+| `vaultBalance`    | `integer`               | Locked / saving balance **in cents**.                                                                                |
 | `activeCardId`    | `string \| null`        | Currently active reward card / activity.                                                                             |
-| `allowanceConfig` | `object`                | `{ amount: number, cadence: 'WEEKLY' \| 'MONTHLY', dayOfWeek: 0..6, ... }`. Drives `sendHabitNotifications` (#17).   |
+| `allowanceConfig` | `object`                | `{ amount: integer (cents), cadence: 'WEEKLY' \| 'MONTHLY', dayOfWeek: 0..6, ... }`. Drives `sendHabitNotifications` (#17). |
 | `parentUids`      | `string[]`              | **The only relationship that matters.** UIDs allowed to read/write this child and its subcollections.               |
 | `createdByUid`    | `string`                | UID of the parent who created the child. Audit only — does not grant any extra privilege.                            |
 | `lastTxnAt`       | `Timestamp \| null`     | Updated by `onTransactionCreate` (#15).                                                                              |
@@ -76,13 +76,13 @@ single `array-contains` query can power the home screen for any parent.
 
 #### `children/{childId}/transactions/{txnId}`
 
-| Field         | Type                                  | Notes                            |
-|---------------|---------------------------------------|----------------------------------|
-| `amount`      | `number`                              | Always positive.                 |
-| `type`        | `'LODGE' \| 'WITHDRAW'`               | Direction of the transaction.    |
-| `description` | `string`                              | Free-text reason.                |
-| `createdAt`   | `Timestamp`                           | Server timestamp.                |
-| `createdByUid`| `string`                              | UID of the parent who logged it. |
+| Field         | Type                                  | Notes                                                |
+|---------------|---------------------------------------|------------------------------------------------------|
+| `amount`      | `integer`                             | Always positive, **in cents** (e.g. `500` = €5.00).  |
+| `type`        | `'LODGE' \| 'WITHDRAW'`               | Direction of the transaction.                        |
+| `description` | `string`                              | Free-text reason.                                    |
+| `createdAt`   | `Timestamp`                           | Server timestamp.                                    |
+| `createdByUid`| `string`                              | UID of the parent who logged it.                     |
 
 Triggers: `onTransactionCreate` (#15) recomputes `child.balance`.
 
@@ -90,7 +90,7 @@ Triggers: `onTransactionCreate` (#15) recomputes `child.balance`.
 
 | Field      | Type                          | Notes                                 |
 |------------|-------------------------------|---------------------------------------|
-| `amount`   | `number`                      | Positive.                             |
+| `amount`   | `integer`                     | Positive, **in cents**.               |
 | `type`     | `'DEPOSIT' \| 'WITHDRAW'`     | Direction.                            |
 | `createdAt`| `Timestamp`                   |                                       |
 | `unlockAt` | `Timestamp \| null`           | Time-locked savings; null = unlocked. |
@@ -100,7 +100,7 @@ Triggers: `onTransactionCreate` (#15) recomputes `child.balance`.
 | Field         | Type                                                | Notes                                                          |
 |---------------|-----------------------------------------------------|----------------------------------------------------------------|
 | `title`       | `string`                                            | Activity / chore name.                                         |
-| `reward`      | `number`                                            | Amount paid out on completion.                                 |
+| `reward`      | `integer`                                           | Amount paid out on completion, **in cents**.                   |
 | `status`      | `'OPEN' \| 'CLAIMED' \| 'COMPLETED' \| 'CANCELLED'` | Drives `sendChildPush` (#18) on transitions.                  |
 | `claimedAt`   | `Timestamp \| null`                                 |                                                                |
 | `completedAt` | `Timestamp \| null`                                 |                                                                |
@@ -121,6 +121,61 @@ link is the secret).
 
 Reads: unauthenticated allowed (the URL is the secret). Writes: only via
 the `acceptInvite` callable (#13) — direct client writes are denied.
+
+## Monetary values
+
+**All monetary fields are stored as integer cents** (the smallest
+currency unit). A balance of €12.50 is stored as `1250`. There is no
+decimal point anywhere in the stored data; formatting happens in the
+client at render time.
+
+### Why not `number`
+
+Firestore's only numeric type is IEEE 754 double-precision float. That
+means `number` is fine for counters but lousy for money: `0.1 + 0.2`
+famously yields `0.30000000000000004`, and running totals drift as
+transactions accumulate. Storing integers sidesteps the problem
+entirely — integer arithmetic in a double is exact up to `2^53`, which
+is ~€90 trillion, so we will never overflow at this app's scale.
+
+### Backfill mapping (Phase 2, issue #12)
+
+The existing Postgres schema uses `Numeric(10, 2)` for money (see
+`mom-bucks/web-app/src/mombucks/models/{child,transaction,vault,activity}.py`).
+The backfill script in #12 converts every such column to integer cents
+by multiplying by 100 and rounding to the nearest integer:
+
+```ts
+// scripts/firestore-backfill.ts
+const cents = Math.round(Number(row.balance) * 100);
+```
+
+The round is load-bearing — floating-point coercion from Postgres `Numeric`
+to JS `number` can introduce sub-cent noise (`12.50` → `12.499999...`),
+and silently truncating that would drop a cent.
+
+### Client rendering
+
+Both the Android app and the web simulator must divide by 100 and format
+with two decimal places at render time:
+
+```kotlin
+// Kotlin
+val euros = cents / 100.0
+val display = String.format("€%.2f", euros)
+```
+
+```ts
+// TypeScript (web simulator)
+const display = new Intl.NumberFormat("en-IE", {
+  style: "currency",
+  currency: "EUR",
+}).format(cents / 100);
+```
+
+This is a Phase 3 concern — the client repositories get rewritten to
+hit Firestore directly and the cents-to-euros conversion moves to the
+UI layer at the same time.
 
 ## Security model (prose)
 
