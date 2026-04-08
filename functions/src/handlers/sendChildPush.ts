@@ -22,8 +22,9 @@
  *   - `buildActivityPush(child, before, after)` — pure, returns a
  *     body only on `LOCKED → READY` transitions, null otherwise.
  *   - `onTransactionPush`, `onActivityPush` — the thin Firestore
- *     trigger wrappers. They use the Phase 4 habit scheduler's
- *     same fan-out + stale-token-reap helper.
+ *     trigger wrappers. They delegate to the shared
+ *     `fanOutToParents` helper (`./fanOutToParents.ts`), which also
+ *     backs `sendHabitNotifications`.
  */
 
 import {
@@ -31,7 +32,8 @@ import {
   onDocumentWritten,
 } from "firebase-functions/v2/firestore";
 import { logger } from "firebase-functions";
-import { getFirestore, FieldValue, getMessaging } from "../admin";
+import { getFirestore } from "../admin";
+import { fanOutToParents } from "./fanOutToParents";
 
 // ─── Types ──────────────────────────────────────────────────────────
 
@@ -127,90 +129,6 @@ export function buildActivityPush(
     title,
     body: after.title || after.description || "Tap to review.",
   };
-}
-
-// ─── Shared fan-out helper ──────────────────────────────────────────
-
-interface SendResult {
-  tokensAttempted: number;
-  notificationsSent: number;
-  tokensCleaned: number;
-}
-
-async function fanOutToParents(
-  db: FirebaseFirestore.Firestore,
-  parentUids: string[],
-  payload: PushPayload,
-): Promise<SendResult> {
-  const result: SendResult = {
-    tokensAttempted: 0,
-    notificationsSent: 0,
-    tokensCleaned: 0,
-  };
-  if (parentUids.length === 0) return result;
-
-  const parentSnaps = await Promise.all(
-    parentUids.map((uid) => db.doc(`users/${uid}`).get()),
-  );
-  const allTokens: string[] = [];
-  const tokenOwnerByToken = new Map<string, string>();
-  for (let i = 0; i < parentSnaps.length; i += 1) {
-    const snap = parentSnaps[i];
-    if (!snap) continue;
-    const uid = parentUids[i];
-    if (!uid) continue;
-    const tokens = (snap.get("fcmTokens") as string[] | undefined) ?? [];
-    for (const tok of tokens) {
-      allTokens.push(tok);
-      tokenOwnerByToken.set(tok, uid);
-    }
-  }
-  if (allTokens.length === 0) return result;
-
-  result.tokensAttempted = allTokens.length;
-
-  const response = await getMessaging().sendEachForMulticast({
-    tokens: allTokens,
-    notification: {
-      title: payload.title,
-      body: payload.body,
-    },
-    data: {
-      kind: payload.kind,
-      childId: payload.childId,
-    },
-  });
-  result.notificationsSent = response.successCount;
-
-  // Same stale-token reaping as sendHabitNotifications (#17). Dead
-  // tokens need pruning from the user doc so we stop shipping to
-  // devices FCM has already discarded.
-  const deadTokensByOwner = new Map<string, Set<string>>();
-  response.responses.forEach((resp, i) => {
-    if (resp.success) return;
-    const code = resp.error?.code ?? "";
-    if (
-      code === "messaging/registration-token-not-registered" ||
-      code === "messaging/invalid-registration-token"
-    ) {
-      const tok = allTokens[i];
-      if (!tok) return;
-      const owner = tokenOwnerByToken.get(tok);
-      if (!owner) return;
-      const set = deadTokensByOwner.get(owner) ?? new Set();
-      set.add(tok);
-      deadTokensByOwner.set(owner, set);
-    }
-  });
-  for (const [uid, deadSet] of deadTokensByOwner.entries()) {
-    const dead = Array.from(deadSet);
-    await db.doc(`users/${uid}`).update({
-      fcmTokens: FieldValue.arrayRemove(...dead),
-    });
-    result.tokensCleaned += dead.length;
-  }
-
-  return result;
 }
 
 // ─── Firestore triggers ─────────────────────────────────────────────

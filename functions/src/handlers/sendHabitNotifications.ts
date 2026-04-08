@@ -22,14 +22,18 @@
  *     then issues FCM multicasts via the shared Admin helper.
  *
  * Cost note: the scan is a full `children` read each hour. At the
- * app's current scale that's cheap. If the collection ever grows
- * past a few thousand docs we can add a `allowanceConfig.frequency`
- * index and query by frequency instead of scanning everything.
+ * app's current scale that's cheap, but we iterate with a cursor
+ * loop (`limit(BATCH_SIZE) + startAfter(lastDoc)`) rather than
+ * loading the whole collection into memory, so the function stays
+ * bounded in memory use as the collection grows. If we ever need to
+ * trim cost further, the escape hatch is to add an
+ * `allowanceConfig.frequency` index and query by frequency.
  */
 
 import { onSchedule } from "firebase-functions/v2/scheduler";
 import { logger } from "firebase-functions";
-import { getFirestore, FieldValue, getMessaging } from "../admin";
+import { getFirestore, FieldValue, FieldPath } from "../admin";
+import { fanOutToParents } from "./fanOutToParents";
 
 // ─── Types ──────────────────────────────────────────────────────────
 
@@ -126,6 +130,13 @@ function sameCalendarDay(a: Date, b: Date): boolean {
 
 // ─── Scheduled handler ──────────────────────────────────────────────
 
+/**
+ * Cursor page size. 500 is comfortably under Firestore's per-query
+ * limits and keeps the in-memory footprint bounded: each child doc
+ * is tiny, so 500 docs at once is well under a MB of heap.
+ */
+const CHILDREN_BATCH_SIZE = 500;
+
 export const sendHabitNotifications = onSchedule(
   {
     schedule: "every 1 hours",
@@ -141,90 +152,56 @@ export const sendHabitNotifications = onSchedule(
     let notificationsSent = 0;
     let tokensCleaned = 0;
 
-    const childSnap = await db.collection("children").get();
-    childrenScanned = childSnap.size;
+    // Cursor-paginated scan of the `children` collection. A single
+    // `.get()` would load every child into memory at once; instead we
+    // page through in chunks of CHILDREN_BATCH_SIZE using `startAfter`
+    // so memory stays bounded regardless of how many children exist.
+    // The query is ordered by document id so the cursor is stable.
+    let lastDoc: FirebaseFirestore.QueryDocumentSnapshot | null = null;
+    for (;;) {
+      let query = db
+        .collection("children")
+        .orderBy(FieldPath.documentId())
+        .limit(CHILDREN_BATCH_SIZE);
+      if (lastDoc) query = query.startAfter(lastDoc);
 
-    for (const childDoc of childSnap.docs) {
-      const data = childDoc.data() as {
-        name?: string;
-        parentUids?: string[];
-        allowanceConfig?: AllowanceConfig | null;
-      };
-      const config = data.allowanceConfig;
-      if (!config) continue;
-      if (!shouldNotifyForConfig(config, now)) continue;
+      const childSnap = await query.get();
+      if (childSnap.empty) break;
+      childrenScanned += childSnap.size;
 
-      childrenMatched += 1;
+      for (const childDoc of childSnap.docs) {
+        const data = childDoc.data() as {
+          name?: string;
+          parentUids?: string[];
+          allowanceConfig?: AllowanceConfig | null;
+        };
+        const config = data.allowanceConfig;
+        if (!config) continue;
+        if (!shouldNotifyForConfig(config, now)) continue;
 
-      const parentUids = data.parentUids ?? [];
-      if (parentUids.length === 0) continue;
+        childrenMatched += 1;
 
-      // Fetch every parent's fcmTokens in parallel.
-      const parentSnaps = await Promise.all(
-        parentUids.map((uid) => db.doc(`users/${uid}`).get()),
-      );
-      const allTokens: string[] = [];
-      const tokenOwnerByToken = new Map<string, string>();
-      for (let i = 0; i < parentSnaps.length; i += 1) {
-        const snap = parentSnaps[i];
-        if (!snap) continue;
-        const uid = parentUids[i];
-        if (!uid) continue;
-        const tokens = (snap.get("fcmTokens") as string[] | undefined) ?? [];
-        for (const tok of tokens) {
-          allTokens.push(tok);
-          tokenOwnerByToken.set(tok, uid);
-        }
-      }
-      if (allTokens.length === 0) continue;
+        const parentUids = data.parentUids ?? [];
+        if (parentUids.length === 0) continue;
 
-      const response = await getMessaging().sendEachForMulticast({
-        tokens: allTokens,
-        notification: {
-          title: `${data.name ?? "Your child"} — time for allowance`,
-          body: "Tap to review and confirm this week's allowance.",
-        },
-        data: {
+        const result = await fanOutToParents(db, parentUids, {
           kind: "HABIT_REMINDER",
           childId: childDoc.id,
-        },
-      });
-
-      notificationsSent += response.successCount;
-
-      // Reap unregistered tokens so we stop trying to send to stale
-      // devices. FCM error codes that indicate a permanent failure:
-      //   messaging/registration-token-not-registered
-      //   messaging/invalid-registration-token
-      const deadTokensByOwner = new Map<string, Set<string>>();
-      response.responses.forEach((resp, i) => {
-        if (resp.success) return;
-        const code = resp.error?.code ?? "";
-        if (
-          code === "messaging/registration-token-not-registered" ||
-          code === "messaging/invalid-registration-token"
-        ) {
-          const tok = allTokens[i];
-          if (!tok) return;
-          const owner = tokenOwnerByToken.get(tok);
-          if (!owner) return;
-          const set = deadTokensByOwner.get(owner) ?? new Set();
-          set.add(tok);
-          deadTokensByOwner.set(owner, set);
-        }
-      });
-      for (const [uid, deadSet] of deadTokensByOwner.entries()) {
-        const dead = Array.from(deadSet);
-        await db.doc(`users/${uid}`).update({
-          fcmTokens: FieldValue.arrayRemove(...dead),
+          title: `${data.name ?? "Your child"} — time for allowance`,
+          body: "Tap to review and confirm this week's allowance.",
         });
-        tokensCleaned += dead.length;
+        notificationsSent += result.notificationsSent;
+        tokensCleaned += result.tokensCleaned;
+
+        // Advance lastGeneratedAt so the next run skips this child.
+        await childDoc.ref.update({
+          "allowanceConfig.lastGeneratedAt": FieldValue.serverTimestamp(),
+        });
       }
 
-      // Advance lastGeneratedAt so the next run skips this child.
-      await childDoc.ref.update({
-        "allowanceConfig.lastGeneratedAt": FieldValue.serverTimestamp(),
-      });
+      if (childSnap.size < CHILDREN_BATCH_SIZE) break;
+      lastDoc = childSnap.docs[childSnap.docs.length - 1] ?? null;
+      if (!lastDoc) break;
     }
 
     logger.info("[sendHabitNotifications] run complete", {
