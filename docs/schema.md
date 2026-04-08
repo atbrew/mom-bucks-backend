@@ -108,11 +108,14 @@ Triggers: `onTransactionCreate` (#15) recomputes `child.balance`.
 ### `invites/{token}`
 
 Top-level so an unauthenticated client can read by token (the invite
-link is the secret).
+link is the secret). **Invites are issued one child at a time** — if a
+parent wants to share two children they send two links. Keeping the
+invite single-child keeps the security boundary trivial: one invite,
+one `arrayUnion` at acceptance time.
 
 | Field          | Type            | Notes                                                                                  |
 |----------------|-----------------|----------------------------------------------------------------------------------------|
-| `childIds`     | `string[]`      | Which children to grant the invitee access to. **Drives co-parenting.**                |
+| `childId`      | `string`        | Which child to grant the invitee access to. **Drives co-parenting.**                   |
 | `invitedEmail` | `string \| null`| Optional email to gate the redemption (nice-to-have, not required for the model).      |
 | `invitedByUid` | `string`        | The parent who issued the invite.                                                      |
 | `expiresAt`    | `Timestamp`     | Hard expiry — `acceptInvite` (#13) rejects after this.                                 |
@@ -204,7 +207,7 @@ Concrete sequence to make the model click:
 1. **Alice signs up.** `users/alice` is created. Alice creates her son
    Sam: `children/sam = { name: "Sam", parentUids: ["alice"], createdByUid: "alice", ... }`.
 2. **Alice invites Bob to co-parent Sam.** Alice's client creates
-   `invites/<token> = { childIds: ["sam"], invitedByUid: "alice", expiresAt: ... }`
+   `invites/<token> = { childId: "sam", invitedByUid: "alice", expiresAt: ... }`
    and shares the invite URL with Bob.
 3. **Bob signs up and opens the link.** Bob's client calls the
    `acceptInvite` callable (#13). The function reads the invite, appends
@@ -215,7 +218,7 @@ Concrete sequence to make the model click:
    subcollection rule sees `"bob"` in `children/sam.parentUids`.
 5. **Alice meets Carol and co-parents Jamie with her.** Alice creates
    `children/jamie = { parentUids: ["alice"], ... }`, then issues an
-   invite with `childIds: ["jamie"]`. Carol accepts. Now
+   invite with `childId: "jamie"`. Carol accepts. Now
    `children/jamie.parentUids = ["alice", "carol"]`.
 6. **Bob's home screen still returns `[sam]`** — `"bob"` is not in
    `children/jamie.parentUids`, and there is no `family` doc tying him

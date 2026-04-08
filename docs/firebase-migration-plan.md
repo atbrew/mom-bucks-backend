@@ -176,7 +176,7 @@ children/{childId}                ← top-level
 
 invites/{token}                   ← top-level so an unauthenticated client can read by token
 
-  childIds: [childA, childB],     ← which kids to grant the invitee access to
+  childId: childA,                ← single child per invite (one link, one child)
 
   invitedEmail, invitedByUid, expiresAt, acceptedByUid
 
@@ -184,7 +184,7 @@ invites/{token}                   ← top-level so an unauthenticated client can
 
 
 
-**How co-parenting works:** When Alice invites Bob to co-parent Sam, the invite carries `childIds: [sam]`. On accept, Bob's uid is appended to `children/sam.parentUids[]`. If Alice later co-parents Jamie with Carol, the invite carries `childIds: [jamie]` and only Carol's uid lands in `children/jamie.parentUids[]`. Bob never sees Jamie; Carol never sees Sam. No "family" doc to coordinate.
+**How co-parenting works:** When Alice invites Bob to co-parent Sam, the invite carries `childId: sam`. On accept, Bob's uid is appended to `children/sam.parentUids[]`. If Alice later co-parents Jamie with Carol, she issues a separate invite with `childId: jamie` and only Carol's uid lands in `children/jamie.parentUids[]`. Bob never sees Jamie; Carol never sees Sam. No "family" doc to coordinate, and invites stay one-child-per-link so the acceptInvite security boundary stays dead simple.
 
 
 
@@ -202,7 +202,7 @@ invites/{token}                   ← top-level so an unauthenticated client can
 
 - `onChildDelete` → fans out cascade delete of subcollections
 
-- `acceptInvite` (callable) → validates token, appends invitee uid to each `childIds` entry's `parentUids[]`, marks invite consumed
+- `acceptInvite` (callable) → validates token, appends invitee uid to the invite's `childId.parentUids[]`, marks invite consumed
 
 - `removeParentFromChildren` (callable) → removes a uid from one or more children's `parentUids[]` (handles "we split up; remove Bob from Sam and Jamie")
 
@@ -348,7 +348,7 @@ Note: this phase touches `atbrew/mom-bucks` only. `mom-bucks-backend` is not yet
 
 - Implement and deploy Cloud Functions:
 
-  - `acceptInvite` (callable) — validates token, appends invitee uid to each `childIds` entry's `parentUids[]`
+  - `acceptInvite` (callable) — validates token, appends invitee uid to the invite's `childId.parentUids[]`
 
   - `removeParentFromChildren` (callable) — removes a uid from one or more children's `parentUids[]`
 

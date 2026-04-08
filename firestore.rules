@@ -142,8 +142,9 @@ service cloud.firestore {
     //
     // IMPORTANT: the acceptInvite callable MUST re-verify at runtime
     // that the inviter (`invitedByUid`) is STILL in `parentUids` of
-    // every child in `childIds` at acceptance time. Rules cannot do
-    // that check because they can't iterate an array of get() calls.
+    // the child at acceptance time. Rules cannot enforce that — they
+    // can't follow a `get()` chain to another doc and then cross-check
+    // the caller's identity against it in a single `create` rule.
     match /invites/{token} {
 
       // READ — anyone who knows the token can read the invite.
@@ -151,19 +152,19 @@ service cloud.firestore {
       allow read: if true;
 
       // CREATE — the inviter must be authenticated and stamp their
-      // own uid into `invitedByUid`, `childIds` must be non-empty
-      // and bounded (to keep acceptInvite's fan-out cheap), and the
-      // invite must have a future `expiresAt`.
+      // own uid into `invitedByUid`, `childId` must be a non-empty
+      // string (invites are issued one child at a time — no multi-child
+      // fan-out), and the invite must have a future `expiresAt`.
       //
       // We cannot verify here that the inviter is actually in the
-      // parentUids of every listed child — rules don't support
-      // iterating per-element get() calls. acceptInvite (#13) is
-      // responsible for re-verifying membership at acceptance time.
+      // child's parentUids — rules cannot make the membership check
+      // conditional on another doc's field during a create on this
+      // doc. acceptInvite (#13) re-verifies membership at acceptance
+      // time, which is where the real security boundary sits.
       allow create: if isSignedIn()
                     && request.resource.data.invitedByUid == request.auth.uid
-                    && request.resource.data.childIds is list
-                    && request.resource.data.childIds.size() >= 1
-                    && request.resource.data.childIds.size() <= 10
+                    && request.resource.data.childId is string
+                    && request.resource.data.childId.size() > 0
                     && request.resource.data.expiresAt > request.time
                     && request.resource.data.acceptedByUid == null;
 
