@@ -13,7 +13,7 @@ const SOON = NOW + 24 * 60 * 60 * 1000; // 1 day in the future
 const LONG_AGO = NOW - 60 * 24 * 60 * 60 * 1000; // 60 days ago
 
 const BASE_INVITE = {
-  childIds: ["c-sam"],
+  childId: "c-sam",
   invitedByUid: "fb-alice",
   invitedEmail: null as string | null,
   expiresAt: ts(SOON) as unknown as import("firebase-admin/firestore").Timestamp,
@@ -33,27 +33,10 @@ describe("decideInviteAcceptance", () => {
         callerUid: "fb-bob",
         callerEmail: "bob@test.com",
         invite: { ...BASE_INVITE },
-        children: new Map([["c-sam", { ...VALID_CHILD }]]),
+        child: { ...VALID_CHILD },
         nowMs: NOW,
       });
-      expect(decision).toEqual({ kind: "accept", childIds: ["c-sam"] });
-    });
-
-    it("accepts a multi-child invite when inviter is on every child", () => {
-      const decision = decideInviteAcceptance({
-        callerUid: "fb-bob",
-        callerEmail: null,
-        invite: { ...BASE_INVITE, childIds: ["c-sam", "c-jamie"] },
-        children: new Map([
-          ["c-sam", { ...VALID_CHILD }],
-          ["c-jamie", { parentUids: ["fb-alice"] }],
-        ]),
-        nowMs: NOW,
-      });
-      expect(decision).toEqual({
-        kind: "accept",
-        childIds: ["c-sam", "c-jamie"],
-      });
+      expect(decision).toEqual({ kind: "accept", childId: "c-sam" });
     });
 
     it("accepts when caller email matches invitedEmail (case-insensitive)", () => {
@@ -61,7 +44,7 @@ describe("decideInviteAcceptance", () => {
         callerUid: "fb-bob",
         callerEmail: "Bob@Test.COM",
         invite: { ...BASE_INVITE, invitedEmail: "bob@test.com" },
-        children: new Map([["c-sam", { ...VALID_CHILD }]]),
+        child: { ...VALID_CHILD },
         nowMs: NOW,
       });
       expect(decision.kind).toBe("accept");
@@ -74,12 +57,12 @@ describe("decideInviteAcceptance", () => {
         callerUid: "fb-bob",
         callerEmail: "bob@test.com",
         invite: { ...BASE_INVITE, acceptedByUid: "fb-bob" },
-        children: new Map([["c-sam", { ...VALID_CHILD, parentUids: ["fb-alice", "fb-bob"] }]]),
+        child: { ...VALID_CHILD, parentUids: ["fb-alice", "fb-bob"] },
         nowMs: NOW,
       });
       expect(decision).toEqual({
         kind: "idempotent-replay",
-        childIds: ["c-sam"],
+        childId: "c-sam",
       });
     });
   });
@@ -90,7 +73,7 @@ describe("decideInviteAcceptance", () => {
         callerUid: "fb-bob",
         callerEmail: null,
         invite: null,
-        children: new Map(),
+        child: null,
         nowMs: NOW,
       });
       expect(decision).toEqual({
@@ -110,7 +93,7 @@ describe("decideInviteAcceptance", () => {
             LONG_AGO,
           ) as unknown as import("firebase-admin/firestore").Timestamp,
         },
-        children: new Map([["c-sam", { ...VALID_CHILD }]]),
+        child: { ...VALID_CHILD },
         nowMs: NOW,
       });
       expect(decision.kind).toBe("reject");
@@ -124,7 +107,7 @@ describe("decideInviteAcceptance", () => {
         callerUid: "fb-bob",
         callerEmail: null,
         invite: { ...BASE_INVITE, acceptedByUid: "fb-carol" },
-        children: new Map([["c-sam", { ...VALID_CHILD }]]),
+        child: { ...VALID_CHILD },
         nowMs: NOW,
       });
       expect(decision.kind).toBe("reject");
@@ -138,7 +121,7 @@ describe("decideInviteAcceptance", () => {
         callerUid: "fb-bob",
         callerEmail: "imposter@evil.com",
         invite: { ...BASE_INVITE, invitedEmail: "bob@test.com" },
-        children: new Map([["c-sam", { ...VALID_CHILD }]]),
+        child: { ...VALID_CHILD },
         nowMs: NOW,
       });
       expect(decision.kind).toBe("reject");
@@ -147,12 +130,12 @@ describe("decideInviteAcceptance", () => {
       }
     });
 
-    it("rejects an empty childIds invite", () => {
+    it("rejects an invite with a blank childId", () => {
       const decision = decideInviteAcceptance({
         callerUid: "fb-bob",
         callerEmail: null,
-        invite: { ...BASE_INVITE, childIds: [] },
-        children: new Map(),
+        invite: { ...BASE_INVITE, childId: "" },
+        child: null,
         nowMs: NOW,
       });
       expect(decision.kind).toBe("reject");
@@ -161,12 +144,12 @@ describe("decideInviteAcceptance", () => {
       }
     });
 
-    it("rejects when a referenced child has been deleted", () => {
+    it("rejects when the referenced child has been deleted", () => {
       const decision = decideInviteAcceptance({
         callerUid: "fb-bob",
         callerEmail: null,
         invite: { ...BASE_INVITE },
-        children: new Map([["c-sam", null]]),
+        child: null,
         nowMs: NOW,
       });
       expect(decision.kind).toBe("reject");
@@ -183,36 +166,13 @@ describe("decideInviteAcceptance", () => {
         callerUid: "fb-bob",
         callerEmail: null,
         invite: { ...BASE_INVITE, invitedByUid: "fb-alice" },
-        children: new Map([
-          ["c-sam", { parentUids: ["fb-carol"] }], // Alice gone, Carol in charge
-        ]),
+        child: { parentUids: ["fb-carol"] }, // Alice gone, Carol in charge
         nowMs: NOW,
       });
       expect(decision.kind).toBe("reject");
       if (decision.kind === "reject") {
         expect(decision.code).toBe("permission-denied");
         expect(decision.message).toContain("inviter is no longer authorised");
-      }
-    });
-
-    it("rejects a multi-child invite when the inviter is gone from even ONE child", () => {
-      // Alice invites Bob to co-parent both Sam and Jamie, then is
-      // removed from Jamie. The whole invite must fail — Firestore
-      // transactions are all-or-nothing, so accepting "just Sam" is
-      // not an option.
-      const decision = decideInviteAcceptance({
-        callerUid: "fb-bob",
-        callerEmail: null,
-        invite: { ...BASE_INVITE, childIds: ["c-sam", "c-jamie"] },
-        children: new Map([
-          ["c-sam", { parentUids: ["fb-alice"] }],
-          ["c-jamie", { parentUids: ["fb-carol"] }],
-        ]),
-        nowMs: NOW,
-      });
-      expect(decision.kind).toBe("reject");
-      if (decision.kind === "reject") {
-        expect(decision.code).toBe("permission-denied");
       }
     });
   });

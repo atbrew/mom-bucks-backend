@@ -2,34 +2,38 @@
  * acceptInvite — Phase 4, issue #13.
  *
  * Callable that lets a freshly authenticated user redeem an invite
- * token, gaining access to the children listed on it. This is what
- * backs the "join my family" UX in the clients.
+ * token, gaining access to the single child listed on it. This is
+ * what backs the "join my family" UX in the clients.
+ *
+ * Invites are issued one child at a time. If a parent wants to share
+ * two children they send two invite links — the extra round trip is
+ * cheap and it keeps the security boundary simple: one invite, one
+ * child, one `arrayUnion` at acceptance time.
  *
  * Security contract (see firestore.rules):
  *   - Clients cannot directly mutate `children/{childId}.parentUids`.
  *   - The ONLY paths that can mutate it are this callable and
  *     removeParentFromChildren (#14), which use the Admin SDK to
  *     bypass the rules.
- *   - Rules cannot iterate an array of `get()` calls, so they can't
- *     verify "the inviter is still in parentUids of every listed
- *     child" at create time. This callable MUST re-verify that
- *     invariant at acceptance time, otherwise a revoked parent's
- *     stale invite could resurrect their access.
+ *   - Rules cannot follow a `get()` chain from the invite doc to the
+ *     referenced child and cross-check membership at create time. This
+ *     callable MUST re-verify the invariant ("the inviter is still in
+ *     parentUids of the child") at acceptance time, otherwise a
+ *     revoked parent's stale invite could resurrect their access.
  *
  * Runtime behaviour, inside a Firestore transaction:
  *   1. Read `invites/{token}`. Reject if missing, expired, or
  *      already consumed by a different uid.
  *   2. If `invitedEmail` is set, verify the caller's email matches.
- *   3. For each childId in the invite's childIds[]:
- *        a. Read the child doc.
- *        b. Reject if the inviter is no longer in parentUids.
- *        c. arrayUnion the caller's uid into parentUids.
- *   4. Mark the invite consumed: set `acceptedByUid` and `acceptedAt`.
- *   5. Return the list of childIds the caller now has access to.
+ *   3. Read the child doc. Reject if it's gone or if the inviter is
+ *      no longer in parentUids.
+ *   4. arrayUnion the caller's uid into the child's parentUids.
+ *   5. Mark the invite consumed: set `acceptedByUid` and `acceptedAt`.
+ *   6. Return the childId the caller now has access to.
  *
  * Idempotency: if the invite was already consumed by the SAME uid
  * (e.g. a client retry after a network hiccup), we return success
- * with the same childIds rather than failing. Accepted by a
+ * with the same childId rather than failing. Accepted by a
  * DIFFERENT uid is a hard error.
  */
 
@@ -40,7 +44,7 @@ import { getFirestore, FieldValue, Timestamp } from "../admin";
 // ─── Types ──────────────────────────────────────────────────────────
 
 interface InviteDoc {
-  childIds: string[];
+  childId: string;
   invitedByUid: string;
   invitedEmail: string | null;
   expiresAt: Timestamp;
@@ -58,34 +62,34 @@ export interface AcceptInviteRequest {
 }
 
 export interface AcceptInviteResponse {
-  childIds: string[];
+  childId: string;
 }
 
 export type AcceptInviteDecision =
-  | { kind: "accept"; childIds: string[] }
-  | { kind: "idempotent-replay"; childIds: string[] }
+  | { kind: "accept"; childId: string }
+  | { kind: "idempotent-replay"; childId: string }
   | { kind: "reject"; code: HttpsError["code"]; message: string };
 
 // ─── Pure decision logic ────────────────────────────────────────────
 
 /**
- * Given an invite doc, the set of child docs the invite references,
- * and the caller's identity, decide what the callable should do.
+ * Given an invite doc, the referenced child doc, and the caller's
+ * identity, decide what the callable should do.
  *
  * This is the interesting part of acceptInvite — rejecting expired /
  * stale / impersonated invites, allowing idempotent retries, and
- * enforcing that the inviter is STILL a parent of every listed child
- * at acceptance time. Extracted from the transactional wrapper so it
+ * enforcing that the inviter is STILL a parent of the child at
+ * acceptance time. Extracted from the transactional wrapper so it
  * can be unit-tested without mocking Firestore.
  */
 export function decideInviteAcceptance(params: {
   callerUid: string;
   callerEmail: string | null;
   invite: InviteDoc | null | undefined;
-  children: Map<string, ChildDoc | null>;
+  child: ChildDoc | null | undefined;
   nowMs: number;
 }): AcceptInviteDecision {
-  const { callerUid, callerEmail, invite, children, nowMs } = params;
+  const { callerUid, callerEmail, invite, child, nowMs } = params;
 
   if (!invite) {
     return {
@@ -106,7 +110,7 @@ export function decideInviteAcceptance(params: {
 
   if (invite.acceptedByUid) {
     if (invite.acceptedByUid === callerUid) {
-      return { kind: "idempotent-replay", childIds: invite.childIds };
+      return { kind: "idempotent-replay", childId: invite.childId };
     }
     return {
       kind: "reject",
@@ -127,35 +131,30 @@ export function decideInviteAcceptance(params: {
     };
   }
 
-  if (!Array.isArray(invite.childIds) || invite.childIds.length === 0) {
+  if (typeof invite.childId !== "string" || invite.childId.length === 0) {
     return {
       kind: "reject",
       code: "failed-precondition",
-      message: "invite has no childIds",
+      message: "invite has no childId",
     };
   }
 
-  // Re-verify the inviter is still a parent of every listed child.
-  // This is the invariant that rules cannot enforce at create time.
-  for (const childId of invite.childIds) {
-    const child = children.get(childId);
-    if (!child) {
-      return {
-        kind: "reject",
-        code: "not-found",
-        message: `child ${childId} no longer exists`,
-      };
-    }
-    if (!child.parentUids?.includes(invite.invitedByUid)) {
-      return {
-        kind: "reject",
-        code: "permission-denied",
-        message: `inviter is no longer authorised to grant access to child ${childId}`,
-      };
-    }
+  if (!child) {
+    return {
+      kind: "reject",
+      code: "not-found",
+      message: `child ${invite.childId} no longer exists`,
+    };
+  }
+  if (!child.parentUids?.includes(invite.invitedByUid)) {
+    return {
+      kind: "reject",
+      code: "permission-denied",
+      message: `inviter is no longer authorised to grant access to child ${invite.childId}`,
+    };
   }
 
-  return { kind: "accept", childIds: invite.childIds };
+  return { kind: "accept", childId: invite.childId };
 }
 
 // ─── Handler ────────────────────────────────────────────────────────
@@ -187,22 +186,22 @@ export const acceptInvite = onCall<
       ? (inviteSnap.data() as InviteDoc)
       : null;
 
-    // Read the child docs up front so decideInviteAcceptance can be
-    // a pure function. Skip if we already know we're going to reject.
-    const childIds = invite?.childIds ?? [];
-    const childRefs = childIds.map((id) => db.doc(`children/${id}`));
-    const childSnaps = await Promise.all(childRefs.map((ref) => tx.get(ref)));
-    const children = new Map<string, ChildDoc | null>();
-    childIds.forEach((id, i) => {
-      const snap = childSnaps[i];
-      children.set(id, snap?.exists ? (snap.data() as ChildDoc) : null);
-    });
+    // Read the child doc up front so decideInviteAcceptance can be a
+    // pure function. Skip if the invite is missing (no childId to look
+    // up) — decideInviteAcceptance will reject on that branch.
+    let child: ChildDoc | null = null;
+    let childRef: FirebaseFirestore.DocumentReference | null = null;
+    if (invite?.childId) {
+      childRef = db.doc(`children/${invite.childId}`);
+      const childSnap = await tx.get(childRef);
+      child = childSnap.exists ? (childSnap.data() as ChildDoc) : null;
+    }
 
     const decision = decideInviteAcceptance({
       callerUid,
       callerEmail,
       invite,
-      children,
+      child,
       nowMs: Date.now(),
     });
 
@@ -211,15 +210,19 @@ export const acceptInvite = onCall<
     }
     if (decision.kind === "idempotent-replay") {
       logger.info("[acceptInvite] idempotent replay", { token, callerUid });
-      return { childIds: decision.childIds };
+      return { childId: decision.childId };
     }
 
     // kind === "accept" — mutate.
-    for (const ref of childRefs) {
-      tx.update(ref, {
-        parentUids: FieldValue.arrayUnion(callerUid),
-      });
+    if (!childRef) {
+      // Unreachable: we only reach "accept" when invite.childId is set,
+      // which means childRef was populated above. Guard for the type
+      // checker.
+      throw new HttpsError("internal", "childRef missing on accept branch");
     }
+    tx.update(childRef, {
+      parentUids: FieldValue.arrayUnion(callerUid),
+    });
     tx.update(inviteRef, {
       acceptedByUid: callerUid,
       acceptedAt: FieldValue.serverTimestamp(),
@@ -228,8 +231,8 @@ export const acceptInvite = onCall<
     logger.info("[acceptInvite] invite consumed", {
       token,
       callerUid,
-      childIds: decision.childIds,
+      childId: decision.childId,
     });
-    return { childIds: decision.childIds };
+    return { childId: decision.childId };
   });
 });

@@ -94,13 +94,13 @@ async function seedChild(
 async function seedInvite(
   token: string,
   invitedByUid: string,
-  childIds: string[],
+  childId: string,
   extra: Record<string, unknown> = {},
 ): Promise<void> {
   await env.withSecurityRulesDisabled(async (ctx) => {
     const db = ctx.firestore();
     await setDoc(doc(db, "invites", token), {
-      childIds,
+      childId,
       invitedByUid,
       invitedEmail: null,
       expiresAt: new Date(Date.now() + 24 * 60 * 60 * 1000),
@@ -460,13 +460,13 @@ describe("co-parenting isolation", () => {
 describe("invites/{token}", () => {
   describe("read", () => {
     it("allows unauthenticated reads by token (URL is the secret)", async () => {
-      await seedInvite("tok1", "alice", ["sam"]);
+      await seedInvite("tok1", "alice", "sam");
       const anon = env.unauthenticatedContext().firestore();
       await assertSucceeds(getDoc(doc(anon, "invites/tok1")));
     });
 
     it("allows authenticated reads by token", async () => {
-      await seedInvite("tok1", "alice", ["sam"]);
+      await seedInvite("tok1", "alice", "sam");
       const bob = env.authenticatedContext("bob").firestore();
       await assertSucceeds(getDoc(doc(bob, "invites/tok1")));
     });
@@ -479,7 +479,7 @@ describe("invites/{token}", () => {
       const alice = env.authenticatedContext("alice").firestore();
       await assertSucceeds(
         setDoc(doc(alice, "invites/tok1"), {
-          childIds: ["sam"],
+          childId: "sam",
           invitedByUid: "alice",
           invitedEmail: null,
           expiresAt: futureDate(),
@@ -493,7 +493,7 @@ describe("invites/{token}", () => {
       const alice = env.authenticatedContext("alice").firestore();
       await assertFails(
         setDoc(doc(alice, "invites/tok1"), {
-          childIds: ["sam"],
+          childId: "sam",
           invitedByUid: "bob",
           expiresAt: futureDate(),
           acceptedByUid: null,
@@ -501,11 +501,11 @@ describe("invites/{token}", () => {
       );
     });
 
-    it("denies creating an invite with an empty childIds", async () => {
+    it("denies creating an invite with an empty childId", async () => {
       const alice = env.authenticatedContext("alice").firestore();
       await assertFails(
         setDoc(doc(alice, "invites/tok1"), {
-          childIds: [],
+          childId: "",
           invitedByUid: "alice",
           expiresAt: futureDate(),
           acceptedByUid: null,
@@ -513,12 +513,15 @@ describe("invites/{token}", () => {
       );
     });
 
-    it("denies creating an invite with more than 10 childIds (fan-out cap)", async () => {
+    it("denies creating an invite with childId as a non-string (e.g. an array, guarding the old multi-child shape)", async () => {
+      // Invites are issued one child at a time. If a client still sends
+      // the legacy `childIds: [...]` shape (or any non-string), rules
+      // must reject it so the stored data stays consistent with what
+      // acceptInvite (#13) expects.
       const alice = env.authenticatedContext("alice").firestore();
-      const elevenIds = Array.from({ length: 11 }, (_, i) => `c${i}`);
       await assertFails(
         setDoc(doc(alice, "invites/tok1"), {
-          childIds: elevenIds,
+          childId: ["sam"],
           invitedByUid: "alice",
           expiresAt: futureDate(),
           acceptedByUid: null,
@@ -530,7 +533,7 @@ describe("invites/{token}", () => {
       const alice = env.authenticatedContext("alice").firestore();
       await assertFails(
         setDoc(doc(alice, "invites/tok1"), {
-          childIds: ["sam"],
+          childId: "sam",
           invitedByUid: "alice",
           expiresAt: new Date(Date.now() - 1000),
           acceptedByUid: null,
@@ -542,7 +545,7 @@ describe("invites/{token}", () => {
       const alice = env.authenticatedContext("alice").firestore();
       await assertFails(
         setDoc(doc(alice, "invites/tok1"), {
-          childIds: ["sam"],
+          childId: "sam",
           invitedByUid: "alice",
           expiresAt: futureDate(),
           acceptedByUid: "bob",
@@ -554,7 +557,7 @@ describe("invites/{token}", () => {
       const anon = env.unauthenticatedContext().firestore();
       await assertFails(
         setDoc(doc(anon, "invites/tok1"), {
-          childIds: ["sam"],
+          childId: "sam",
           invitedByUid: "alice",
           expiresAt: futureDate(),
           acceptedByUid: null,
@@ -565,7 +568,7 @@ describe("invites/{token}", () => {
 
   describe("update", () => {
     it("denies direct updates even by the creator (acceptance must go through #13)", async () => {
-      await seedInvite("tok1", "alice", ["sam"]);
+      await seedInvite("tok1", "alice", "sam");
       const alice = env.authenticatedContext("alice").firestore();
       await assertFails(
         updateDoc(doc(alice, "invites/tok1"), { acceptedByUid: "bob" }),
@@ -575,13 +578,13 @@ describe("invites/{token}", () => {
 
   describe("delete", () => {
     it("allows the inviter to revoke an unclaimed invite", async () => {
-      await seedInvite("tok1", "alice", ["sam"]);
+      await seedInvite("tok1", "alice", "sam");
       const alice = env.authenticatedContext("alice").firestore();
       await assertSucceeds(deleteDoc(doc(alice, "invites/tok1")));
     });
 
     it("denies another user from deleting someone else's invite", async () => {
-      await seedInvite("tok1", "alice", ["sam"]);
+      await seedInvite("tok1", "alice", "sam");
       const bob = env.authenticatedContext("bob").firestore();
       await assertFails(deleteDoc(doc(bob, "invites/tok1")));
     });

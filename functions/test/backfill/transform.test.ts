@@ -587,7 +587,7 @@ describe("transformInvite", () => {
       createdAt.getTime() + LIFETIME_DAYS * 24 * 60 * 60 * 1000,
     );
     expect(out.expiresAt).toEqual(expected);
-    expect(out.childIds).toEqual(["c-sam"]);
+    expect(out.childId).toBe("c-sam");
     expect(out.invitedByUid).toBe("fb-alice");
     expect(out.invitedEmail).toBe("bob@test.com");
     expect(out.acceptedByUid).toBeNull();

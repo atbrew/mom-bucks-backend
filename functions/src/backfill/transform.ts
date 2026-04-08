@@ -196,7 +196,7 @@ export interface FirestoreActivity {
 }
 
 export interface FirestoreInvite {
-  childIds: string[];
+  childId: string;
   invitedByUid: string;
   invitedEmail: string | null;
   expiresAt: Date;
@@ -446,8 +446,10 @@ export function pickVaultBalanceCents(vaults: PgVault[]): number {
  * invite doc. Only PENDING invites are ported; accepted/declined/revoked
  * are historical.
  *
- * The Postgres schema has one child per invite; Firestore uses
- * `childIds: string[]` so future multi-child invites are native.
+ * Both Postgres and Firestore store one child per invite. If a parent
+ * wants to share two children they send two invite links — the extra
+ * round trip is cheap and it keeps the acceptInvite security boundary
+ * dead simple (one invite → one `arrayUnion`).
  *
  * Expiry is computed as `row.created_at + lifetimeDays`, NOT
  * `now + lifetimeDays` — an invite that was created six months ago
@@ -476,7 +478,7 @@ export function transformInvite(
     return null;
   }
   return {
-    childIds: [row.child_id],
+    childId: row.child_id,
     invitedByUid,
     invitedEmail: row.invitee_email,
     expiresAt,
