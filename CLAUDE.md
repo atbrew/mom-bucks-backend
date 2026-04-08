@@ -28,7 +28,7 @@ fields or indexes, update `schema.md` in the same PR.
 - **Auth:** Firebase Auth (email/password). No custom claims at this
   stage — security rules read `parentUids` directly via `get()`.
 - **Storage:** Firebase Storage. Rules in `storage.rules`.
-- **Hosting:** Firebase Hosting (web simulator destination, post-Phase 5).
+- **Hosting:** Firebase Hosting (web simulator destination — wired up when the user is ready to flip clients over from Flask).
 - **Two projects:** `mom-bucks-dev-b3772` (alias `dev`, also `default`) and
   `mom-bucks-prod-81096` (alias `prod`). See `.firebaserc`. Blaze upgrade
   + budget alerts are tracked in

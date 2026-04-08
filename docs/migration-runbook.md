@@ -6,10 +6,12 @@ Mom Bucks Postgres database into the Firestore collections defined in
 work (issue #12); the dual-write layer in the Flask API
 (`atbrew/mom-bucks`) is the second half and is tracked separately.
 
-The backfill is intended to run **once** at cutover time. Re-running
-it is safe — it uses deterministic document IDs (the Postgres row
-UUIDs) and `set()` semantics, so a second run exactly rewrites the
-last transformed state.
+The backfill can be re-run freely during development — it uses
+deterministic document IDs (the Postgres row UUIDs) and `set()`
+semantics, so each run exactly rewrites the last transformed
+state. There is no longer a single "cutover" run; the backfill is
+a dev tool for seeding Firebase from Postgres whenever the two
+need to be re-aligned.
 
 ## Source of truth
 
@@ -37,8 +39,10 @@ Before you run the backfill:
    for the target Firebase project from the Firebase console
    → Project settings → Service accounts. Keep it out of git.
 4. **Target Firebase project.** Confirm which project you're
-   writing to — staging for dry runs, prod only at final cutover.
-   Double-check `FIREBASE_PROJECT_ID` in the environment matches.
+   writing to — `mom-bucks-dev-b3772` is the daily sandbox;
+   `mom-bucks-prod-81096` is only written to when the user is
+   ready to exercise the production environment. Double-check
+   `FIREBASE_PROJECT_ID` in the environment matches.
 
 ## Dry run against dev
 
@@ -86,24 +90,25 @@ Spot-check a co-parented child in the Firebase console:
 
 ## Rollback
 
-Firestore has no transactional rollback for bulk writes. If a dry
-run goes wrong, the recovery path is:
+Mom Bucks is still in development mode — there is no live user data
+in either Postgres or Firestore that needs preservation. The rollback
+story is correspondingly simple:
 
-1. **If the target is staging**, just wipe the entire Firestore
-   database via the Firebase console and re-run the backfill after
-   fixing whatever broke. No user harm.
-2. **If the target is prod**, do NOT wipe. Instead:
-   - Stop clients from reading Firestore (the `USE_FIREBASE_BACKEND`
-     flag in `atbrew/mom-bucks` clients — Phase 3).
-   - Investigate which docs are wrong.
-   - Either run a targeted fix script or restore from the nightly
-     Firestore backup (enable this on prod before cutover — GCP
-     Firestore backups are a Blaze-only feature).
+1. **Wipe Firestore**, fix whatever broke, re-run the backfill.
+   The Firebase console's "Delete collection" action is sufficient.
+   No staging-vs-prod distinction; both projects are development
+   sandboxes until clients are flipped over.
+2. **If the clients are already pointed at Firebase** when something
+   breaks, toggle `USE_FIREBASE_BACKEND` off in the client build
+   and rebuild. Flask + Postgres are still running and serving the
+   exact same surface, so the fallback is seamless. No Firestore
+   restore drill, no Postgres archive — the old stack IS the
+   rollback.
 
-The Postgres backup in GCS (90-day retention per Phase 5 plan) is
-the ultimate rollback: wipe Firestore, restore Postgres, flip clients
-back to the Flask API. This is the reason Phase 5 is a hard cutover
-rather than a progressive migration.
+There is intentionally no Firestore-backup-driven rollback plan.
+Enabling Firestore scheduled backups is a pre-production concern
+that gets addressed when the user decides to take the app out of
+development mode.
 
 ## Known limitations / follow-ups
 
