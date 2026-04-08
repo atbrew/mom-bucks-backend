@@ -304,13 +304,13 @@ Note: this phase touches `atbrew/mom-bucks` only. `mom-bucks-backend` is not yet
 
 - Commit `firestore.rules` enforcing the `parentUids` membership check on children and their subcollections.
 
-- Implement `scripts/firestore-backfill.ts` — connects to a **read-only Postgres replica DSN** of the live database, walks `users`, `family_members`, `children`, `transactions`, `activities`, etc., and writes deterministic-ID Firestore docs. Critically: **it flattens families out of existence** by translating "user U is in family F, family F has child C" into "append U to children/C.parentUids". A child shared by two households ends up with both parents' uids in `parentUids[]`. Idempotent. Tested against a fixture with at least one co-parented child.
+- Implement the backfill script at `functions/src/backfill/` (CLI entry `cli.ts`, pure logic in `transform.ts`, orchestration in `runBackfill.ts`; run via `npm run backfill`). Connects to a **read-only Postgres replica DSN** of the live database, walks `users`, `family_members`, `children`, `transactions`, `activities`, etc., and writes deterministic-ID Firestore docs. Note: the original plan described a `families` table with a `family_members` join, but the actual source has **no `families` table** — `family_members` is already a direct `child_id ↔ user_id` join. The flattening is correspondingly simpler: for each child, `parentUids = {firebase_uid of children.parent_id} ∪ {firebase_uid of every family_members.user_id where child_id matches}`. A child shared across two households still ends up with both parents' uids in `parentUids[]`. Idempotent. Tested against a fixture with the Alice/Bob/Carol co-parenting scenario from `docs/schema.md`. Full runbook in `docs/migration-runbook.md`.
 
 
 
 **In `atbrew/mom-bucks`:**
 
-- Add a **dual-write layer** in the Flask API: every successful Postgres write also writes to the staging Firebase project via Firebase Admin SDK (best-effort, logged on failure). New module: `web-app/src/mombucks/firestore_sync.py`. The dual-write for children must apply the same family-flattening logic: look up which users are members of which family the child belongs to, and write the union into `parentUids[]`.
+- Add a **dual-write layer** in the Flask API: every successful Postgres write also writes to the staging Firebase project via Firebase Admin SDK (best-effort, logged on failure). New module: `web-app/src/mombucks/firestore_sync.py`. The dual-write for children must apply the same flattening logic: `parentUids = {firebase_uid of children.parent_id} ∪ {firebase_uid of family_members.user_id where child_id matches}`. See `mom-bucks-backend/functions/src/backfill/transform.ts → computeParentUidsByChild` for the canonical implementation.
 
 - Configuration: `FIRESTORE_DUAL_WRITE_ENABLED`, `FIREBASE_PROJECT_ID`, service account credentials.
 
@@ -412,9 +412,9 @@ Note: this phase touches `atbrew/mom-bucks` only. `mom-bucks-backend` is not yet
 
 - `functions/` (new top-level directory) with `acceptInvite`, `removeParentFromChildren`, `onTransactionCreate`, `onChildDelete`, `sendHabitNotifications`, `sendChildPush`
 
-- `scripts/start-emulators.sh`
+- `scripts/start-emulators.sh`, `scripts/run-rules-tests.sh`
 
-- `scripts/firestore-backfill.ts`
+- `functions/src/backfill/` (transform + runBackfill + cli)
 
 - `web-app/src/mombucks/firebase_auth.py` (Phase 1, deleted Phase 5)
 

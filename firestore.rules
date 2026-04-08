@@ -1,21 +1,180 @@
 rules_version = '2';
 
-// PHASE 0 BASELINE — DO NOT SHIP TO PROD UNCHANGED.
+// Real parentUids membership model — Phase 2, issue #10.
 //
-// This file is intentionally deny-all everywhere except the `hello`
-// collection used by the helloWorld smoke-test in issue #8. The real
-// parentUids-based membership rules land in issue #10 (Phase 2).
+// Replaces the Phase 0 deny-all baseline. Source of truth for the
+// prose version: docs/schema.md → "Security model (prose)".
+//
+// Principles:
+//   - There is no `family` collection. Children carry `parentUids: string[]`.
+//   - `users/{uid}` is strictly self-scoped.
+//   - Children and everything under them are gated on
+//     `request.auth.uid in <child>.parentUids`.
+//   - `parentUids` itself can ONLY be mutated by server-side callables
+//     (acceptInvite #13, removeParentFromChildren #14) via the Admin
+//     SDK, which bypasses these rules. Clients cannot touch it.
+//   - Invites are readable by anyone who knows the token (the token is
+//     the secret). They can be created by authenticated users but not
+//     directly updated — acceptance goes through the #13 callable.
+//
+// The Phase 0 `hello/` escape hatch is gone: the deployed helloWorld
+// function writes via Admin SDK, which bypasses rules, so the
+// collection doesn't need a rule at all and is covered by the
+// default-deny.
+
 service cloud.firestore {
   match /databases/{database}/documents {
 
-    // Smoke-test escape hatch — see issue #8.
-    // Lets the helloWorld callable round-trip a doc to prove the rules
-    // pipeline is wired end-to-end. This block is removed in issue #10.
-    match /hello/{docId} {
-      allow read, write: if request.auth != null;
+    // ─────────────────────────────────────────────────────────────────
+    // helpers
+    // ─────────────────────────────────────────────────────────────────
+
+    function isSignedIn() {
+      return request.auth != null;
     }
 
-    // Default: deny everything. The real rules arrive in issue #10.
+    function isSelf(uid) {
+      return isSignedIn() && request.auth.uid == uid;
+    }
+
+    // The canonical "am I a parent of this child?" check.
+    // Reads the child doc once; the result is cached for the duration
+    // of a single rule evaluation so subcollection reads don't pay for
+    // it twice.
+    function isChildParent(childId) {
+      return isSignedIn()
+          && request.auth.uid in
+             get(/databases/$(database)/documents/children/$(childId)).data.parentUids;
+    }
+
+    // True iff an update leaves `parentUids` exactly as it was.
+    // Used to ban client-side mutations of membership; those must go
+    // through the acceptInvite / removeParentFromChildren callables.
+    function parentUidsUnchanged() {
+      return !(request.resource.data.diff(resource.data).affectedKeys()
+                .hasAny(['parentUids']));
+    }
+
+    // ─────────────────────────────────────────────────────────────────
+    // users/{uid}
+    // ─────────────────────────────────────────────────────────────────
+    //
+    // A user doc is created on first sign-in by the client itself (the
+    // doc ID must match the caller's Firebase Auth uid). Only the
+    // owning user can read or write it — nobody else ever touches it.
+    match /users/{uid} {
+      allow read, write: if isSelf(uid);
+    }
+
+    // ─────────────────────────────────────────────────────────────────
+    // children/{childId}
+    // ─────────────────────────────────────────────────────────────────
+    //
+    // The unit of access. Security rests entirely on the
+    // `parentUids: string[]` field.
+    match /children/{childId} {
+
+      // READ — any parent in the array can read the child doc.
+      allow read: if isSignedIn()
+                  && request.auth.uid in resource.data.parentUids;
+
+      // CREATE — the caller MUST include their own uid in `parentUids`.
+      // Prevents anyone from creating a child they can't themselves
+      // access (which would be a useless but messy state to clean up).
+      allow create: if isSignedIn()
+                    && request.auth.uid in request.resource.data.parentUids
+                    && request.resource.data.parentUids.size() >= 1;
+
+      // UPDATE — any current parent can update the child, BUT cannot
+      // directly mutate `parentUids`. Membership changes go through
+      // the acceptInvite (#13) / removeParentFromChildren (#14)
+      // callables.
+      allow update: if isSignedIn()
+                    && request.auth.uid in resource.data.parentUids
+                    && parentUidsUnchanged();
+
+      // DELETE — any current parent can delete the child.
+      //
+      // Intentionally permissive: hard deletion is how children
+      // actually get removed (soft-delete via `deletedAt` is an
+      // escape hatch; `onChildDelete` (#16) cascades subcollections).
+      // The "last parent standing" guard lives in
+      // removeParentFromChildren (#14), not here — direct deletes by a
+      // current parent are a supported recovery path.
+      allow delete: if isSignedIn()
+                    && request.auth.uid in resource.data.parentUids;
+
+      // ───────────────────────────────────────────────────────────
+      // children/{childId}/transactions/{txnId}
+      // ───────────────────────────────────────────────────────────
+      match /transactions/{txnId} {
+        allow read, write: if isChildParent(childId);
+      }
+
+      // ───────────────────────────────────────────────────────────
+      // children/{childId}/vaultTransactions/{id}
+      // ───────────────────────────────────────────────────────────
+      match /vaultTransactions/{vaultTxnId} {
+        allow read, write: if isChildParent(childId);
+      }
+
+      // ───────────────────────────────────────────────────────────
+      // children/{childId}/activities/{activityId}
+      // ───────────────────────────────────────────────────────────
+      match /activities/{activityId} {
+        allow read, write: if isChildParent(childId);
+      }
+    }
+
+    // ─────────────────────────────────────────────────────────────────
+    // invites/{token}
+    // ─────────────────────────────────────────────────────────────────
+    //
+    // Invites are the co-parenting enrolment mechanism. The token in
+    // the document ID is the secret — anyone who knows it can read
+    // the invite in order to accept it. Acceptance happens through the
+    // acceptInvite (#13) callable which uses the Admin SDK and
+    // bypasses these rules.
+    //
+    // IMPORTANT: the acceptInvite callable MUST re-verify at runtime
+    // that the inviter (`invitedByUid`) is STILL in `parentUids` of
+    // every child in `childIds` at acceptance time. Rules cannot do
+    // that check because they can't iterate an array of get() calls.
+    match /invites/{token} {
+
+      // READ — anyone who knows the token can read the invite.
+      // Unauthenticated access is intentional; the token is the secret.
+      allow read: if true;
+
+      // CREATE — the inviter must be authenticated and stamp their
+      // own uid into `invitedByUid`, `childIds` must be non-empty
+      // and bounded (to keep acceptInvite's fan-out cheap), and the
+      // invite must have a future `expiresAt`.
+      //
+      // We cannot verify here that the inviter is actually in the
+      // parentUids of every listed child — rules don't support
+      // iterating per-element get() calls. acceptInvite (#13) is
+      // responsible for re-verifying membership at acceptance time.
+      allow create: if isSignedIn()
+                    && request.resource.data.invitedByUid == request.auth.uid
+                    && request.resource.data.childIds is list
+                    && request.resource.data.childIds.size() >= 1
+                    && request.resource.data.childIds.size() <= 10
+                    && request.resource.data.expiresAt > request.time
+                    && request.resource.data.acceptedByUid == null;
+
+      // UPDATE — denied. The only legitimate mutation is acceptance,
+      // which goes through the acceptInvite callable.
+      allow update: if false;
+
+      // DELETE — the inviter can revoke an unclaimed invite.
+      allow delete: if isSignedIn()
+                    && resource.data.invitedByUid == request.auth.uid;
+    }
+
+    // ─────────────────────────────────────────────────────────────────
+    // default deny for anything not matched above
+    // ─────────────────────────────────────────────────────────────────
     match /{document=**} {
       allow read, write: if false;
     }
