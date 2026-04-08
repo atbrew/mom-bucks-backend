@@ -5,8 +5,7 @@
  *   acceptInvite, removeParentFromChildren, onTransactionCreate,
  *   onChildDelete, sendHabitNotifications, sendChildPush.
  *
- * The helloWorld smoke test (issue #8) will be the first export and
- * stays as a permanent health probe.
+ * helloWorld (issue #8) stays as a permanent health probe.
  */
 
-export {};
+export { helloWorld } from "./helloWorld";
