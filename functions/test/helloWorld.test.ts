@@ -4,7 +4,7 @@ import { beforeEach, describe, expect, it, vi } from "vitest";
 // calls initializeApp() at module load and getFirestore() inside the
 // request handler — both need to be noops in unit tests so we don't need
 // a real emulator running. The real Firestore plumbing is exercised by
-// the post-deploy smoke test documented in issue #8.
+// the post-deploy live curl smoke test documented in issue #8.
 //
 // Spies live inside `vi.hoisted(...)` because `vi.mock(...)` is hoisted
 // above `const` declarations at runtime — referencing a plain `const`
@@ -36,32 +36,60 @@ vi.mock("firebase-admin/firestore", () => ({
 // Importing AFTER the mocks so the module picks them up.
 import { helloWorld } from "../src/helloWorld";
 
-// firebase-functions/v2 onCall returns a CallableFunction; its internal
-// `.run()` accepts a CallableRequest shape. We invoke it via the `.run`
-// property so we can pass a fake auth + data payload without spinning up
-// the Functions emulator.
-type Runnable = {
-  run: (req: {
-    data: unknown;
-    auth: { uid: string } | null;
-    rawRequest: unknown;
-    acceptsStreaming: boolean;
-  }) => unknown | Promise<unknown>;
+// firebase-functions/v2 onRequest returns an Express-shaped handler.
+// We invoke it via the `__endpoint`-bypassing `.run` property when
+// available, otherwise treat the export as the handler itself.
+type RequestLike = {
+  method: string;
+  get: (header: string) => string | undefined;
+};
+type ResponseLike = {
+  status: (code: number) => ResponseLike;
+  json: (body: unknown) => ResponseLike;
 };
 
-function runHandler(auth: { uid: string } | null): Promise<unknown> {
-  const runnable = helloWorld as unknown as Runnable;
-  return Promise.resolve(
-    runnable.run({
-      data: {},
-      auth,
-      rawRequest: {},
-      acceptsStreaming: false,
-    }),
+function makeReq(overrides: Partial<RequestLike> = {}): RequestLike {
+  return {
+    method: "GET",
+    get: () => undefined,
+    ...overrides,
+  };
+}
+
+function makeRes(): {
+  res: ResponseLike;
+  statusCode: () => number;
+  body: () => unknown;
+} {
+  let statusCode = 0;
+  let body: unknown = undefined;
+  const res: ResponseLike = {
+    status(code: number) {
+      statusCode = code;
+      return res;
+    },
+    json(b: unknown) {
+      body = b;
+      return res;
+    },
+  };
+  return { res, statusCode: () => statusCode, body: () => body };
+}
+
+async function runHandler(
+  req: RequestLike,
+  res: ResponseLike,
+): Promise<void> {
+  // firebase-functions/v2 onRequest exports the handler as a callable
+  // Express-style function — invoking it directly is the supported way to
+  // unit-test it.
+  await (helloWorld as unknown as (r: RequestLike, s: ResponseLike) => Promise<void>)(
+    req,
+    res,
   );
 }
 
-describe("helloWorld callable", () => {
+describe("helloWorld HTTPS endpoint", () => {
   beforeEach(() => {
     setSpy.mockClear();
     docSpy.mockClear();
@@ -69,39 +97,52 @@ describe("helloWorld callable", () => {
     getFirestoreMock.mockClear();
   });
 
-  it("returns ok payload with ISO timestamp and runtime", async () => {
-    const res = (await runHandler({ uid: "alice" })) as {
+  it("returns 200 with ok payload, ISO timestamp, and runtime tag", async () => {
+    const { res, statusCode, body } = makeRes();
+    await runHandler(makeReq(), res);
+
+    expect(statusCode()).toBe(200);
+    const payload = body() as {
       ok: boolean;
       ts: string;
       runtime: string;
       project: string;
     };
-
-    expect(res.ok).toBe(true);
-    expect(res.runtime).toBe("node20");
-    expect(typeof res.ts).toBe("string");
-    expect(() => new Date(res.ts).toISOString()).not.toThrow();
-    expect(typeof res.project).toBe("string");
+    expect(payload.ok).toBe(true);
+    expect(payload.runtime).toBe("node22");
+    expect(typeof payload.ts).toBe("string");
+    expect(() => new Date(payload.ts).toISOString()).not.toThrow();
+    expect(typeof payload.project).toBe("string");
   });
 
   it("writes a hello/{docId} record via the Admin SDK", async () => {
-    await runHandler({ uid: "alice" });
+    const { res } = makeRes();
+    await runHandler(
+      makeReq({
+        method: "POST",
+        get: (h: string) => (h === "user-agent" ? "vitest" : undefined),
+      }),
+      res,
+    );
 
     expect(collectionSpy).toHaveBeenCalledWith("hello");
     expect(docSpy).toHaveBeenCalledTimes(1);
     expect(setSpy).toHaveBeenCalledTimes(1);
     const written = setSpy.mock.calls[0][0] as {
       calledAt: unknown;
-      callerUid: string | null;
+      method: string;
+      userAgent: string | null;
     };
     expect(written.calledAt).toBe("__SERVER_TIMESTAMP__");
-    expect(written.callerUid).toBe("alice");
+    expect(written.method).toBe("POST");
+    expect(written.userAgent).toBe("vitest");
   });
 
-  it("records null callerUid when the request is unauthenticated", async () => {
-    await runHandler(null);
+  it("records null userAgent when the header is missing", async () => {
+    const { res } = makeRes();
+    await runHandler(makeReq(), res);
 
-    const written = setSpy.mock.calls[0][0] as { callerUid: string | null };
-    expect(written.callerUid).toBeNull();
+    const written = setSpy.mock.calls[0][0] as { userAgent: string | null };
+    expect(written.userAgent).toBeNull();
   });
 });

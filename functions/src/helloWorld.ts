@@ -1,4 +1,4 @@
-import { onCall, HttpsError } from "firebase-functions/v2/https";
+import { onRequest } from "firebase-functions/v2/https";
 import { initializeApp, getApps } from "firebase-admin/app";
 import { getFirestore, FieldValue } from "firebase-admin/firestore";
 
@@ -13,26 +13,32 @@ if (getApps().length === 0) {
  *
  * Issue #8. Purpose:
  *   1. Prove the full deploy pipeline works: repo → `firebase deploy`
- *      → live callable in `mom-bucks-dev-b3772`.
+ *      → live HTTPS endpoint in `mom-bucks-dev-b3772`.
  *   2. Give us a cheap, always-available round-trip canary we can hit
- *      from a workstation or CI to confirm the Functions runtime is up.
+ *      from a workstation, CI, or `curl` to confirm the Functions
+ *      runtime is up and Firestore is reachable.
  *
- * Behaviour:
- *   - Writes a doc to `hello/{timestamp}` via Admin SDK (bypasses security
- *     rules) so we can confirm Firestore connectivity from inside the
- *     Functions runtime.
- *   - Returns `{ ok: true, ts: <ISO string>, runtime: "node20", project }`
- *     so the caller can verify the request was handled by the expected
- *     project and runtime.
- *   - Does not require the caller to be authenticated — the rules in
- *     #5 leave `hello/{docId}` open to authenticated clients, but the
- *     Function itself uses Admin and is callable unauthenticated so a
- *     plain `curl` can exercise it. (Switch to auth-required in #10 if
- *     we decide the smoke test should prove auth too.)
+ * Deliberately an `onRequest` (HTTPS) function, not an `onCall`
+ * (Firebase callable):
+ *   - Callables require a Firebase Auth ID token, which means you can't
+ *     hit them from a plain `curl` without spinning up a Firebase client.
+ *     That defeats the point of a smoke test you can run from a
+ *     terminal.
+ *   - The real handlers (Phase 4 — acceptInvite, removeParentFromChildren)
+ *     will be `onCall` because they enforce per-user auth. helloWorld is
+ *     intentionally different.
+ *
+ * The endpoint is public (`invoker: public`). The blast radius is
+ * bounded:
+ *   - Each call writes ONE doc to `hello/{docId}`.
+ *   - No PII, no auth state changes.
+ *   - The `hello/` collection is hidden behind a deny-all rule (#5);
+ *     only the Admin SDK from inside this function can write to it.
+ *   - Budget alert ($10/month per #2) catches any abuse.
  */
-export const helloWorld = onCall(
-  { region: "us-central1" },
-  async (request) => {
+export const helloWorld = onRequest(
+  { region: "us-central1", invoker: "public" },
+  async (req, res) => {
     const project =
       process.env.GCLOUD_PROJECT ?? process.env.GCP_PROJECT ?? "unknown";
 
@@ -41,23 +47,25 @@ export const helloWorld = onCall(
       const ref = db.collection("hello").doc();
       await ref.set({
         calledAt: FieldValue.serverTimestamp(),
-        callerUid: request.auth?.uid ?? null,
+        method: req.method,
+        userAgent: req.get("user-agent") ?? null,
       });
     } catch (err) {
       // If Firestore is reachable from the runtime this should never fire.
       // Surface a clean error so the caller knows the runtime is up but
       // Firestore plumbing is broken.
-      throw new HttpsError(
-        "internal",
-        `firestore write failed: ${(err as Error).message}`,
-      );
+      res.status(500).json({
+        ok: false,
+        error: `firestore write failed: ${(err as Error).message}`,
+      });
+      return;
     }
 
-    return {
+    res.status(200).json({
       ok: true,
       ts: new Date().toISOString(),
-      runtime: "node20",
+      runtime: "node22",
       project,
-    };
+    });
   },
 );
