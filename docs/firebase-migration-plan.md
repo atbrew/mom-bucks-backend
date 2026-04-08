@@ -18,7 +18,7 @@ The intended outcome: delete a large amount of bespoke infrastructure (JWT issua
 
 
 
-The Firebase migration lives in a **new, separate repository: `atbrew/mom-bucks-backend`**. The existing `atbrew/mom-bucks` repo continues shipping unchanged Flask + Postgres releases until the cutover. This isolates the migration completely:
+The Firebase migration lives in a **new, separate repository: `atbrew/mom-bucks-backend`**. The existing `atbrew/mom-bucks` repo continues shipping unchanged Flask + Postgres releases while Firebase is built out side-by-side. This isolates the migration completely:
 
 
 
@@ -98,7 +98,7 @@ mom-bucks-backend/
 
 - `atbrew/mom-bucks-backend` owns the Firebase project, rules, functions, and migration tooling.
 
-- `atbrew/mom-bucks` owns the Android app, the web simulator, and (until Phase 5) the Flask API.
+- `atbrew/mom-bucks` owns the Android app, the web simulator, and the Flask API (still running until the user flips clients to Firebase).
 
 - Schema is the contract: `mom-bucks-backend/docs/schema.md` is the source of truth for collection shapes. The Architect mirrors any changes into `atbrew/mom-bucks/specs/` so both client teams see them.
 
@@ -380,25 +380,39 @@ Note: this phase touches `atbrew/mom-bucks` only. `mom-bucks-backend` is not yet
 
 
 
-### Phase 5 — Hard cutover, decommission Flask + Postgres (1 PR in `atbrew/mom-bucks`)
+### Phase 5 — Side-by-side parity via contract tests (1 PR in `mom-bucks-backend`)
 
-- Stop dual-writes; Firestore is the source of truth.
+**Goal:** prove the Firebase backend implements the same user-facing operations as the Flask backend, before any client cutover. This replaces the original "hard cutover + decommission" phase.
 
-- Take a final Postgres backup, archive to GCS (90-day retention — only rollback path).
+**Framing:** Mom Bucks is still in development mode. There is no production user data to preserve, and no requirement to keep the two backends in lockstep for data-integrity reasons. What matters is that whenever the clients flip to Firebase, the *behaviour* is equivalent — same inputs produce the same outputs.
 
-- Tear down Flask container, GCP instance, Cloud SQL.
+**Scope:**
 
-- Delete `web-app/src/mombucks/api/`, `models/`, `alembic/`, `scheduler.py`, `storage.py`, `auth.py`, `firebase_auth.py`, `firestore_sync.py`, JWT code, idempotency code.
+- Build a **contract test suite** under `functions/test/contract/` that exercises both backends with identical inputs and asserts the observable outputs match. The Flask side is driven over HTTP with a Firebase ID token (using the hybrid auth middleware from Phase 1). The Firebase side uses the Firestore Web SDK against the emulator + deployed callable/trigger functions, then waits for derived state (e.g. recomputed `balance`) to settle.
 
-- Keep `web-app/` only as the simulator SPA, deployed via Firebase Hosting from `mom-bucks-backend`'s `firebase.json` (or the SPA can move to `mom-bucks-backend/hosting/` — to be decided in Phase 5 PR).
+- One test per user-visible operation, grouped by domain:
+  - **Children:** create child, rename, delete (cascade).
+  - **Transactions:** create LODGE, create WITHDRAW, balance recomputation (including the clamp-at-zero behaviour on over-withdraw).
+  - **Activities:** create, claim, `LOCKED → READY` push fan-out.
+  - **Invites:** issue, accept (single-child shape), expired/already-consumed rejection, revoked-parent loophole.
+  - **Co-parenting:** remove one of two parents from a child (positive case), refuse to remove the last parent (last-parent guard).
+  - **Habit notifications:** the hourly scheduled function's decision logic — assert `shouldNotifyForConfig` agrees with Flask's APScheduler cadence evaluator for DAILY / WEEKLY / FORTNIGHTLY / MONTHLY.
 
-- Update `CLAUDE.md`, `README.md`, deployment docs in both repos.
+- Each test is parameterised by backend target. A shared harness normalises differences — Flask returns HTTP 201 with a body; Firestore requires a listener + a `waitFor` on the derived document. The harness handles both and exposes `expect(result).toMatchParity(...)` so individual tests stay readable.
 
-- Archive or rewrite `atbrew/mom-bucks/specs/` since the Flask API contracts no longer apply; the source of truth is now `mom-bucks-backend/docs/schema.md`.
+- The suite runs in CI against:
+  - Firestore emulator + Functions emulator on the Firebase side.
+  - A locally-booted Flask container pointed at a throwaway Postgres (already wired for Phase 2 dev work) on the Flask side.
 
+- **Out of scope:** continuous drift monitoring, dual-write reconciliation, production data parity. None of these are needed in dev mode.
 
+**Verification:** the contract suite runs green in CI. When a discrepancy surfaces, the fix lands in whichever backend is wrong — usually Firebase, since Flask is the reference.
 
-**Verification:** Full `/qa-regression` against production Firebase project. Show-and-tell with side-by-side Android + web screenshots of every screen. Cost dashboard reviewed after 7 days to confirm <$5/month.
+**Not in this phase (deliberately deferred):**
+
+- **Client cutover.** Flipping Android + web simulator onto Firebase writes is a later decision — it happens whenever the user is ready, as a single atomic flip. Not sequenced against the contract tests.
+- **Flask + Postgres decommission.** Deleting the old stack is a simple one-PR motion in `atbrew/mom-bucks` when the clients are moved over. No Postgres archive, no 48-hour bake, no rollback drill — development-mode data has no preservation requirement.
+- **Dual-write.** Not required for parity. The contract suite is the parity mechanism; dual-write (if it exists in `atbrew/mom-bucks` from Phase 2) can be turned off at any time with no cost.
 
 
 
@@ -416,9 +430,9 @@ Note: this phase touches `atbrew/mom-bucks` only. `mom-bucks-backend` is not yet
 
 - `functions/src/backfill/` (transform + runBackfill + cli)
 
-- `web-app/src/mombucks/firebase_auth.py` (Phase 1, deleted Phase 5)
+- `web-app/src/mombucks/firebase_auth.py` (Phase 1; deleted whenever the old stack is torn down)
 
-- `web-app/src/mombucks/firestore_sync.py` (Phase 2, deleted Phase 5)
+- `web-app/src/mombucks/firestore_sync.py` (Phase 2; deleted whenever the old stack is torn down)
 
 
 
@@ -444,7 +458,7 @@ Note: this phase touches `atbrew/mom-bucks` only. `mom-bucks-backend` is not yet
 
 
 
-**To delete (Phase 5):**
+**To delete when the old stack is torn down (unsequenced future PR in `atbrew/mom-bucks`):**
 
 - `web-app/src/mombucks/api/` (entire directory)
 
@@ -455,6 +469,8 @@ Note: this phase touches `atbrew/mom-bucks` only. `mom-bucks-backend` is not yet
 - `web-app/Dockerfile`, GCP deploy scripts
 
 - `web-app/src/mombucks/auth.py`, `scheduler.py`, `storage.py`
+
+This list is aspirational — no phase in this plan schedules the deletion. It happens when the user decides the clients are moved over.
 
 
 
@@ -488,7 +504,7 @@ Note: this phase touches `atbrew/mom-bucks` only. `mom-bucks-backend` is not yet
 
 5. **QA skills:** `/qa-fresh-install`, `/qa-web-smoke`, `/qa-cross-platform`, `/qa-regression` all pass against staging Firebase project before each PR merges.
 
-6. **Cost gate:** After Phase 5 ships, watch the Firebase billing dashboard for 7 days. If monthly projection >$10, file a follow-up issue to investigate read amplification.
+6. **Cost gate:** Once clients cut over and Firebase starts seeing real traffic, watch the billing dashboard for 7 days. If monthly projection >$10, file a follow-up issue to investigate read amplification. Not tied to any specific phase — triggered by traffic, not by a PR merge.
 
 7. **Show-and-tell:** Each phase commits `docs/specs/YY-MM-DD-firebase-phase-N/show-and-tell.md` with side-by-side Android + web screenshots, per the project's standard quality gate.
 
@@ -500,11 +516,9 @@ Note: this phase touches `atbrew/mom-bucks` only. `mom-bucks-backend` is not yet
 
 - **Listener cost runaway** — mitigated by per-family scoping and the $10 budget alert. Real-time listeners only bill for changed docs, so this is far cheaper than the current polling pattern.
 
-- **Migration data drift** — dual-write phase (Phase 2) runs for 48h and is monitored before clients cut over.
+- **Behavioural drift between backends** — mitigated by the Phase 5 contract test suite. Any observable divergence surfaces as a failing parity test, not as a production incident. Development-mode context means there is no user-data drift to worry about, only code-behaviour drift.
 
 - **Lost optimistic locking** — replaced by Firestore transactions which retry on contention; tested explicitly in Phase 4 with concurrent-write integration tests.
-
-- **No rollback after Phase 5** — keep the Postgres backup in GCS for 90 days, and keep the dual-write code on a tag in case we need to resurrect it.
 
 - **Co-parent removal** — when Alice removes Bob from co-parenting Sam, the `removeParentFromChildren` callable strips Bob's uid from `children/sam.parentUids[]`. Bob immediately loses access via security rules. If Bob also co-parented Jamie with Alice and that's not removed, Bob keeps Jamie. Explicit integration test: parent A removes parent B from one of two co-parented children; B retains access to the other.
 
@@ -522,9 +536,9 @@ Note: this phase touches `atbrew/mom-bucks` only. `mom-bucks-backend` is not yet
 
 - **Password reset branding:** Firebase default email template. No custom action handler.
 
-- **Phase 5 decommission:** Hard cutover. Flask + Postgres torn down immediately after Phase 4 bakes. Postgres backup in GCS for 90 days is the only rollback.
+- **Phase 5 scope:** Side-by-side parity via a contract test suite. No hard cutover, no Postgres archive, no production rollback drill. Development-mode framing — the tear-down of Flask + Postgres is an unsequenced future PR in `atbrew/mom-bucks`, taken whenever the clients flip to Firebase.
 
-- **Repository:** New `atbrew/mom-bucks-backend` repo for all Firebase code; `atbrew/mom-bucks` keeps the Android app, web simulator frontend, and (until Phase 5) Flask API.
+- **Repository:** New `atbrew/mom-bucks-backend` repo for all Firebase code; `atbrew/mom-bucks` keeps the Android app, web simulator frontend, and the Flask API (running until the user decides to flip clients over).
 
 - **Region:** `us-central1`, confirmed as matching current GCP region — no change needed.
 
