@@ -252,7 +252,7 @@ Each phase ships independently and leaves the app working end-to-end. Use the st
 
 - Create the `atbrew/mom-bucks-backend` repo with the layout above.
 
-- Create Firebase projects `mom-bucks-prod` and `mom-bucks-staging`, enable Firestore, Auth, Storage, Hosting, Functions.
+- Create Firebase projects `mom-bucks-prod` and `mom-bucks-dev` (provisioned as `mom-bucks-prod-81096` and `mom-bucks-dev-b3772` after GCP suffixing), enable Firestore, Auth, Storage, Hosting, Functions.
 
 - Upgrade to Blaze, set a $10/month budget alert.
 
@@ -528,5 +528,5 @@ Note: this phase touches `atbrew/mom-bucks` only. `mom-bucks-backend` is not yet
 
 - **Region:** `us-central1`, confirmed as matching current GCP region — no change needed.
 
-- **Plan document location:** This plan will be copied into `mom-bucks-backend/docs/firebase-migration-plan.md` once that repo exists (Phase 0).
+- **Plan document location:** This plan lives at `mom-bucks-backend/docs/firebase-migration-plan.md` as of Phase 0 bootstrap.
 

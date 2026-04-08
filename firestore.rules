@@ -1,0 +1,23 @@
+rules_version = '2';
+
+// PHASE 0 BASELINE — DO NOT SHIP TO PROD UNCHANGED.
+//
+// This file is intentionally deny-all everywhere except the `hello`
+// collection used by the helloWorld smoke-test in issue #8. The real
+// parentUids-based membership rules land in issue #10 (Phase 2).
+service cloud.firestore {
+  match /databases/{database}/documents {
+
+    // Smoke-test escape hatch — see issue #8.
+    // Lets the helloWorld callable round-trip a doc to prove the rules
+    // pipeline is wired end-to-end. This block is removed in issue #10.
+    match /hello/{docId} {
+      allow read, write: if request.auth != null;
+    }
+
+    // Default: deny everything. The real rules arrive in issue #10.
+    match /{document=**} {
+      allow read, write: if false;
+    }
+  }
+}
