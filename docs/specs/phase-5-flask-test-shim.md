@@ -191,7 +191,7 @@ Shim-on must not regress the normal JWT code path.
 def test_shim_refuses_to_boot_in_production(monkeypatch):
     monkeypatch.setenv("FLASK_ENV", "production")
     monkeypatch.setenv("TEST_AUTH_BYPASS_ENABLED", "1")
-    with pytest.raises(RuntimeError, match="TEST_AUTH_BYPASS_ENABLED cannot be set in production"):
+    with pytest.raises(RuntimeError, match="TEST_AUTH_BYPASS_ENABLED cannot be set in production environments"):
         create_app()
 ```
 
@@ -206,6 +206,10 @@ def test_shim_on_respects_idempotency_key(client_with_shim_enabled, seeded_user,
         "X-Test-Auth-User": "alice@example.com",
         "Idempotency-Key": "test-lodge-1",
     }
+    # Flask's on-wire monetary format is dollars-as-float (Numeric(10,2)),
+    # not integer cents. 10.00 means ten dollars. Do NOT change this to
+    # an integer — the Firebase side uses integer cents, but that's the
+    # contract harness's problem to normalise, not this Flask-native test.
     body = {"type": "LODGE", "amount": 10.00, "description": "test"}
     r1 = client_with_shim_enabled.post(f"/api/v1/children/{seeded_child.id}/transactions", json=body, headers=headers)
     r2 = client_with_shim_enabled.post(f"/api/v1/children/{seeded_child.id}/transactions", json=body, headers=headers)
