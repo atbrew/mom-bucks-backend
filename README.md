@@ -49,7 +49,7 @@ The emulator UI will be available at <http://localhost:4000>.
 |-----------|------|
 | Auth      | 9099 |
 | Firestore | 8080 |
-| Functions | 5001 |
+| Functions | 5005 |
 | Storage   | 9199 |
 | Hosting   | 5000 |
 | UI        | 4000 |

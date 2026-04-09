@@ -1,0 +1,30 @@
+# Docker Compose override for contract tests.
+#
+# This file layers on top of
+# `$MOM_BUCKS_REPO_PATH/integration-tests/docker-compose.test.yml`
+# (the Flask repo's own test compose) when `functions/test/contract/
+# harness/bootFlask.ts` spins the stack up for a contract-test run.
+#
+# Its only job is to toggle the Flask test-auth shim on. The shim is
+# gated behind `TEST_AUTH_BYPASS_ENABLED` at Flask boot, and when
+# enabled it honours an `X-Test-Auth-User: <email>` header to
+# impersonate that user without real JWT login — the contract tests
+# rely on this to switch between users mid-run.
+#
+# Full contract spec for the shim:
+#   docs/specs/phase-5-flask-test-shim.md
+# Flask-side implementation (shipped in atbrew/mom-bucks):
+#   web-app/src/mombucks/api/test_auth_shim.py
+#
+# This override lives in `mom-bucks-backend` (not in the Flask repo)
+# on purpose — CLAUDE.md forbids this repo from modifying Flask code,
+# and layering an override file keeps the toggle version-controlled
+# here while leaving the Flask repo's own tests unaffected.
+
+services:
+  api:
+    environment:
+      # Flip on the test-auth shim. The Flask app refuses to boot
+      # with this env var set in combination with FLASK_ENV=production,
+      # so it's safe to ship this override in source control.
+      - TEST_AUTH_BYPASS_ENABLED=1
