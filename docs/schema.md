@@ -97,13 +97,24 @@ Triggers: `onTransactionCreate` (#15) recomputes `child.balance`.
 
 #### `children/{childId}/activities/{activityId}`
 
-| Field         | Type                                                | Notes                                                          |
-|---------------|-----------------------------------------------------|----------------------------------------------------------------|
-| `title`       | `string`                                            | Activity / chore name.                                         |
-| `reward`      | `integer`                                           | Amount paid out on completion, **in cents**.                   |
-| `status`      | `'OPEN' \| 'CLAIMED' \| 'COMPLETED' \| 'CANCELLED'` | Drives `sendChildPush` (#18) on transitions.                  |
-| `claimedAt`   | `Timestamp \| null`                                 |                                                                |
-| `completedAt` | `Timestamp \| null`                                 |                                                                |
+Mirrors the Postgres `activities` table (allowances, recurring
+bounties, vault interest) after backfill. The lifecycle is
+deliberately two-state (`LOCKED → READY`): a pending activity sits
+`LOCKED` until it's due, flips to `READY`, and on claim either
+recycles back to `LOCKED` at its next due date (recurring) or is
+deleted outright (one-off). See `functions/src/backfill/transform.ts`
+for the authoritative mapping and `functions/src/handlers/sendChildPush.ts`
+for the push-fan-out trigger.
+
+| Field       | Type                                           | Notes                                                       |
+|-------------|------------------------------------------------|-------------------------------------------------------------|
+| `title`     | `string`                                       | Activity / chore name (mapped from Flask `description`).    |
+| `reward`    | `integer`                                      | Amount paid out on claim, **in cents**.                     |
+| `type`      | `'ALLOWANCE' \| 'BOUNTY_RECURRING' \| 'INTEREST'` | Kind of activity; maps from Flask `card_type`.          |
+| `status`    | `'LOCKED' \| 'READY'`                          | Drives `onActivityPush` (#18) on `LOCKED → READY`.          |
+| `dueDate`   | `Timestamp`                                    | When the activity becomes claimable.                        |
+| `claimedAt` | `Timestamp \| null`                            | Set when claimed; cleared on recycle.                       |
+| `createdAt` | `Timestamp`                                    |                                                             |
 
 ### `invites/{token}`
 

@@ -41,6 +41,24 @@ export interface NormalizedTransaction {
 }
 
 /**
+ * Neutral activity shape for parity assertions. Only the fields the
+ * contract test cares about — we deliberately drop timestamps
+ * (`createdAt`, `claimedAt`), server-assigned IDs, and Flask-only OCC
+ * concepts like `version`/`bounty_id` because they diverge by design.
+ *
+ * `dueDate` is a plain YYYY-MM-DD string so Flask's ISO date and
+ * Firebase's Timestamp collapse to the same representation without
+ * timezone surprises.
+ */
+export interface NormalizedActivity {
+  title: string;
+  type: "ALLOWANCE" | "BOUNTY_RECURRING" | "INTEREST";
+  status: "LOCKED" | "READY";
+  rewardCents: number;
+  dueDate: string;
+}
+
+/**
  * Convert a Flask dollars-as-float money value to integer cents.
  *
  * Round to the nearest cent to absorb float representation noise
@@ -153,4 +171,120 @@ export function normalizeFirebaseTransaction(raw: unknown): NormalizedTransactio
     amountCents: obj.amount,
     description: typeof obj.description === "string" ? obj.description : "",
   };
+}
+
+function assertActivityType(
+  value: unknown,
+  source: string,
+): "ALLOWANCE" | "BOUNTY_RECURRING" | "INTEREST" {
+  if (value === "ALLOWANCE" || value === "BOUNTY_RECURRING" || value === "INTEREST") {
+    return value;
+  }
+  throw new TypeError(`${source}: bad activity type: ${String(value)}`);
+}
+
+function assertActivityStatus(
+  value: unknown,
+  source: string,
+): "LOCKED" | "READY" {
+  if (value === "LOCKED" || value === "READY") {
+    return value;
+  }
+  throw new TypeError(`${source}: bad activity status: ${String(value)}`);
+}
+
+/**
+ * Normalize a Flask activity `to_dict()` into the shared shape.
+ * Flask's wire names are `card_type`, `description`, `amount`,
+ * `due_date`; amounts are dollars-as-float and `due_date` is already
+ * a YYYY-MM-DD ISO string (see `Activity.to_dict` in the Flask
+ * repo), so no transformation needed beyond dollars→cents.
+ */
+export function normalizeFlaskActivity(raw: unknown): NormalizedActivity {
+  const obj = raw as {
+    card_type?: unknown;
+    status?: unknown;
+    amount?: unknown;
+    description?: unknown;
+    due_date?: unknown;
+  };
+  if (typeof obj.description !== "string") {
+    throw new TypeError(
+      `normalizeFlaskActivity: missing description: ${JSON.stringify(raw)}`,
+    );
+  }
+  if (typeof obj.amount !== "number") {
+    throw new TypeError(
+      `normalizeFlaskActivity: missing/invalid amount: ${JSON.stringify(raw)}`,
+    );
+  }
+  if (typeof obj.due_date !== "string") {
+    throw new TypeError(
+      `normalizeFlaskActivity: missing due_date: ${JSON.stringify(raw)}`,
+    );
+  }
+  return {
+    title: obj.description,
+    type: assertActivityType(obj.card_type, "normalizeFlaskActivity"),
+    status: assertActivityStatus(obj.status, "normalizeFlaskActivity"),
+    rewardCents: centsFromDollars(obj.amount),
+    dueDate: obj.due_date,
+  };
+}
+
+/**
+ * Normalize a Firebase activity doc. Firestore stores the canonical
+ * shape (`title`, `reward` in cents, `type`, `status`, `dueDate`
+ * Timestamp). `dueDate` lands as a Firestore Timestamp via the client
+ * SDK, so we convert to YYYY-MM-DD in UTC to match Flask's
+ * `date.isoformat()` output.
+ */
+export function normalizeFirebaseActivity(raw: unknown): NormalizedActivity {
+  const obj = raw as {
+    title?: unknown;
+    type?: unknown;
+    status?: unknown;
+    reward?: unknown;
+    dueDate?: unknown;
+  };
+  if (typeof obj.title !== "string") {
+    throw new TypeError(
+      `normalizeFirebaseActivity: missing title: ${JSON.stringify(raw)}`,
+    );
+  }
+  if (typeof obj.reward !== "number") {
+    throw new TypeError(
+      `normalizeFirebaseActivity: missing/invalid reward: ${JSON.stringify(raw)}`,
+    );
+  }
+  return {
+    title: obj.title,
+    type: assertActivityType(obj.type, "normalizeFirebaseActivity"),
+    status: assertActivityStatus(obj.status, "normalizeFirebaseActivity"),
+    rewardCents: obj.reward,
+    dueDate: extractDueDate(obj.dueDate),
+  };
+}
+
+/**
+ * The client SDK returns `dueDate` as a Firestore Timestamp (has
+ * `.toDate()`) when the field was written via `Timestamp.fromDate`.
+ * Handle that plus a stringy fallback just in case a test writes a
+ * raw string. UTC slice of `toISOString()` gives YYYY-MM-DD.
+ */
+function extractDueDate(value: unknown): string {
+  if (value && typeof value === "object" && "toDate" in value) {
+    const d = (value as { toDate: () => Date }).toDate();
+    return d.toISOString().slice(0, 10);
+  }
+  if (value instanceof Date) {
+    return value.toISOString().slice(0, 10);
+  }
+  if (typeof value === "string") {
+    // Already YYYY-MM-DD — common when tests assign a literal.
+    return value.slice(0, 10);
+  }
+  throw new TypeError(
+    `normalizeFirebaseActivity: missing/invalid dueDate: ${String(value)}`,
+  );
 }
