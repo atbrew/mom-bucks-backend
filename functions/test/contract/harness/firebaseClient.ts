@@ -54,6 +54,8 @@ import {
   doc,
   setDoc,
   getDoc,
+  updateDoc,
+  deleteDoc,
   collection,
   addDoc,
   serverTimestamp,
@@ -213,6 +215,105 @@ export async function getFirebaseChild(input: {
     throw new Error(`Firebase child ${input.childId} not found`);
   }
   return normalizeFirebaseChild(snap.data());
+}
+
+export interface FirebaseGetChildResult {
+  ok: boolean;
+  /** Set when `ok === false`: either `permission-denied` or `not-found`. */
+  errorCode?: string;
+  child?: NormalizedChild;
+}
+
+/**
+ * Non-throwing `getFirebaseChild`. Returns a discriminated shape so
+ * tests can assert on "the backend refused this read" without having
+ * to wrap every call in try/catch.
+ *
+ * Error shapes **under the current rule set**:
+ *   - non-parent read         → `{ ok: false, errorCode: "permission-denied" }`
+ *   - read of a deleted child → `{ ok: false, errorCode: "permission-denied" }`
+ *
+ * Both failure modes collapse to `permission-denied` because the
+ * children READ rule (`firestore.rules:78`) dereferences
+ * `resource.data.parentUids` without a null guard. On a missing doc,
+ * `resource` is null and the rule errors out before Firestore can
+ * surface "doc doesn't exist" — the SDK reports permission-denied.
+ * See the `deleteFirebaseChild` note below for the longer version.
+ *
+ * Consequence: **this helper cannot be used to verify post-delete
+ * absence**. Use `awaitFirebaseChildDocAbsent` from `adminClient.ts`
+ * for that — admin SDK bypasses rules and returns a faithful
+ * "exists / doesn't exist" signal.
+ *
+ * The `not-found` branch below is kept as forward-compat: if the
+ * rule ever gains a `resource != null` guard, a post-delete read by
+ * a legitimate parent would start returning `!snap.exists()` cleanly
+ * and this branch would activate. Until then it's unreachable for
+ * `children/{id}` reads, and the inline comment says so.
+ */
+export async function tryGetFirebaseChild(input: {
+  user: FirebaseUserHandle;
+  childId: string;
+}): Promise<FirebaseGetChildResult> {
+  try {
+    const snap = await getDoc(doc(input.user.db, "children", input.childId));
+    if (!snap.exists()) {
+      // Unreachable under the current children read rule (the rule
+      // errors out before we get here on a missing doc). Kept as
+      // forward-compat in case the rule grows a null guard — see the
+      // docstring above.
+      return { ok: false, errorCode: "not-found" };
+    }
+    return { ok: true, child: normalizeFirebaseChild(snap.data()) };
+  } catch (err) {
+    const code = extractFirestoreErrorCode(err);
+    if (code === "permission-denied") {
+      return { ok: false, errorCode: code };
+    }
+    throw err;
+  }
+}
+
+export interface FirebaseRenameChildInput {
+  user: FirebaseUserHandle;
+  childId: string;
+  name: string;
+}
+
+/**
+ * Rename a child via `updateDoc`. The update rule
+ * (`firestore.rules:96-98`) allows any current parent to update the
+ * child doc as long as `parentUids` is untouched — so a plain
+ * `updateDoc({name})` is all we need.
+ */
+export async function renameFirebaseChild(
+  input: FirebaseRenameChildInput,
+): Promise<void> {
+  await updateDoc(doc(input.user.db, "children", input.childId), {
+    name: input.name,
+  });
+}
+
+/**
+ * Delete a child doc. The `onChildDelete` trigger (#16) fires
+ * asynchronously and cascades the child's subcollections
+ * (`transactions`, `vaultTransactions`, `activities`); use
+ * `awaitFirebaseChildDocAbsent` + `awaitFirebaseChildSubcollectionEmpty`
+ * from `adminClient.ts` to wait for the cascade to land.
+ *
+ * Note: we deliberately do NOT expose a client-SDK-based "is it gone
+ * yet" poller here. The children read rule (`firestore.rules:78`)
+ * dereferences `resource.data.parentUids` without a null guard, so
+ * a `getDoc` on a deleted child surfaces as a rule Null value error,
+ * which the SDK reports as `permission-denied`. That's indistinguishable
+ * from a genuine access denial, so we rely on the admin-SDK helper
+ * for post-delete doc absence verification.
+ */
+export async function deleteFirebaseChild(input: {
+  user: FirebaseUserHandle;
+  childId: string;
+}): Promise<void> {
+  await deleteDoc(doc(input.user.db, "children", input.childId));
 }
 
 export interface FirebaseCreateTransactionInput {

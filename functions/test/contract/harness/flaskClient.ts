@@ -56,7 +56,7 @@ class FlaskApiError extends Error {
  * returns the parsed JSON body on success. Keeps call sites tidy.
  */
 async function callFlask<T = unknown>(
-  method: "GET" | "POST" | "PUT" | "DELETE",
+  method: "GET" | "POST" | "PUT" | "PATCH" | "DELETE",
   path: string,
   opts: { body?: unknown; impersonateEmail?: string } = {},
 ): Promise<T> {
@@ -130,6 +130,91 @@ export async function getFlaskChild(
     impersonateEmail,
   });
   return normalizeFlaskChild(res);
+}
+
+export interface FlaskGetChildResult {
+  ok: boolean;
+  status: number;
+  child?: NormalizedChild;
+}
+
+/**
+ * Non-throwing variant of `getFlaskChild`. Used when a test needs to
+ * observe a 404 (post-delete assertions, cross-parent reads) without
+ * wrapping every call site in try/catch. Mirrors the shape of
+ * `createFlaskTransaction`'s `{ok, status}` return.
+ *
+ * Note: Flask collapses "not found" and "not your child" into a
+ * single 404 — see `require_child_for_parent` in the Flask children
+ * API (`web-app/src/mombucks/api/children.py`). A caller that needs
+ * to disambiguate the two cases can't, and shouldn't try to: both
+ * are "the caller cannot see this child" from the parity standpoint.
+ */
+export async function tryGetFlaskChild(input: {
+  impersonateEmail: string;
+  childId: string;
+}): Promise<FlaskGetChildResult> {
+  const headers: Record<string, string> = {
+    "Content-Type": "application/json",
+    [TEST_AUTH_HEADER]: input.impersonateEmail,
+  };
+  const res = await fetch(
+    `${FLASK_BASE_URL}/api/v1/children/${input.childId}`,
+    { method: "GET", headers },
+  );
+  if (!res.ok) {
+    return { ok: false, status: res.status };
+  }
+  const body = (await res.json()) as unknown;
+  return {
+    ok: true,
+    status: res.status,
+    child: normalizeFlaskChild(body),
+  };
+}
+
+export interface FlaskRenameChildInput {
+  impersonateEmail: string;
+  childId: string;
+  name: string;
+}
+
+/**
+ * Rename a child via `PATCH /api/v1/children/:id`. Flask accepts both
+ * `name` and `date_of_birth` on this endpoint; we only send `name`
+ * because the contract test never changes a DOB. The PATCH endpoint
+ * supports an optional `If-Match` header for optimistic concurrency
+ * but the contract tests never hit a concurrent-rename case, so we
+ * omit it and let Flask apply the update unconditionally.
+ */
+export async function renameFlaskChild(
+  input: FlaskRenameChildInput,
+): Promise<NormalizedChild> {
+  const res = await callFlask<unknown>(
+    "PATCH",
+    `/api/v1/children/${input.childId}`,
+    {
+      impersonateEmail: input.impersonateEmail,
+      body: { name: input.name },
+    },
+  );
+  return normalizeFlaskChild(res);
+}
+
+/**
+ * Delete a child. Flask returns 204 No Content on success. The Flask
+ * handler cascades explicitly (deletes transactions, vault rows,
+ * activities, etc. before the child row itself), so a follow-up GET
+ * on either the child or any of its subresources is guaranteed to
+ * 404.
+ */
+export async function deleteFlaskChild(input: {
+  impersonateEmail: string;
+  childId: string;
+}): Promise<void> {
+  await callFlask<void>("DELETE", `/api/v1/children/${input.childId}`, {
+    impersonateEmail: input.impersonateEmail,
+  });
 }
 
 export interface FlaskCreateTransactionInput {
