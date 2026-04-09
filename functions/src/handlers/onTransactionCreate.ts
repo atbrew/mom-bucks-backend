@@ -15,12 +15,22 @@
  *   - `lastTxnAt` is set to the server timestamp
  *   - `version` is bumped so clients can detect stale reads
  *
- * Clamping on would-go-negative is deliberate: the transaction doc
- * has already been written by the time this trigger fires, so a
- * refusal at this stage can't un-do it. We clamp to 0, log a
- * structured warning, and let operations investigate out-of-band.
- * Clients that want to prevent the write altogether should do it
- * at the callable / validation layer instead.
+ * Clamping on would-go-negative is defense-in-depth. The primary
+ * guard against overspend lives in `firestore.rules`, which denies
+ * WITHDRAW creates where `amount > child.balance` synchronously at
+ * write time. This trigger fires AFTER the doc has landed, so a
+ * refusal here can't un-do the write — the rules layer is the only
+ * place the transaction can actually be rejected.
+ *
+ * That said, two paths can still deliver a negative-yielding write
+ * to this trigger:
+ *   1. Admin SDK writers (backfill, callables) bypass security rules.
+ *   2. Concurrent WITHDRAWs issued against the same child can both
+ *      read a sufficient balance, both pass the rule check, and then
+ *      land in sequence — the second one now overspends.
+ *
+ * When either happens, we clamp the resulting balance at 0 and log a
+ * structured warning so operations can investigate out-of-band.
  */
 
 import { onDocumentCreated } from "firebase-functions/v2/firestore";

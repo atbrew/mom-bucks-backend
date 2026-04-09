@@ -111,8 +111,29 @@ service cloud.firestore {
       // ───────────────────────────────────────────────────────────
       // children/{childId}/transactions/{txnId}
       // ───────────────────────────────────────────────────────────
+      //
+      // READ/UPDATE/DELETE are any-parent, same as the rest of the
+      // child's subcollections. CREATE is where the overspend guard
+      // lives: a WITHDRAW whose `amount` exceeds the parent child's
+      // current `balance` is rejected synchronously at write time.
+      //
+      // Why the rule and not the trigger: `onTransactionCreate` (#15)
+      // fires AFTER the doc has been written, so it cannot un-do the
+      // write — the best it can do is clamp the resulting balance at
+      // zero and log. Enforcing at the rules layer is the only place
+      // we can refuse the transaction synchronously. The trigger's
+      // clamp-at-zero path remains as defense-in-depth (Admin-SDK
+      // writers bypass rules, and concurrent WITHDRAWs could still
+      // race).
       match /transactions/{txnId} {
-        allow read, write: if isChildParent(childId);
+        allow read, update, delete: if isChildParent(childId);
+
+        allow create: if isChildParent(childId)
+                      && (
+                           request.resource.data.type != 'WITHDRAW'
+                           || request.resource.data.amount <=
+                              get(/databases/$(database)/documents/children/$(childId)).data.balance
+                         );
       }
 
       // ───────────────────────────────────────────────────────────
