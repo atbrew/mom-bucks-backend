@@ -163,7 +163,9 @@ export async function createFlaskTransaction(
     [TEST_AUTH_HEADER]: input.impersonateEmail,
   };
   // Flask wire format: dollars as float. amountCents 1050 → amount 10.5.
-  // Integer division by 100 keeps the value exact for any cents value.
+  // Division by 100 keeps the value close enough for Flask's Numeric(10,2)
+  // to round correctly; `centsFromDollars` in normalize.ts uses Math.round
+  // on the return trip to absorb any IEEE-754 noise.
   const amountDollars = input.amountCents / 100;
   const res = await fetch(
     `${FLASK_BASE_URL}/api/v1/children/${input.childId}/transactions`,
@@ -178,9 +180,12 @@ export async function createFlaskTransaction(
     },
   );
   if (!res.ok) {
-    // Drain the body so the connection can close cleanly; we don't
-    // use it for anything but it helps diagnose failures in CI logs.
-    await res.text().catch(() => "");
+    // Capture the body for CI log diagnostics (overspend tests send a
+    // deliberate 4xx, so we can't throw; we just record the reason).
+    const errBody = await res.text().catch(() => "");
+    if (errBody) {
+      console.error(`[flaskClient] ${input.type} → ${res.status}: ${errBody}`);
+    }
     return { ok: false, status: res.status };
   }
   const body = (await res.json()) as { transaction: unknown };

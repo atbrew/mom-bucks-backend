@@ -56,6 +56,7 @@ import {
   getDoc,
   collection,
   addDoc,
+  serverTimestamp,
   type Firestore,
 } from "firebase/firestore";
 import {
@@ -129,6 +130,7 @@ export async function createFirebaseUser(input: {
     email: input.email,
     photoUrl: null,
     fcmTokens: [],
+    createdAt: serverTimestamp(),
   });
   return {
     uid,
@@ -265,6 +267,7 @@ export async function createFirebaseTransaction(
     type: input.type,
     description: input.description,
     createdByUid: input.user.uid,
+    createdAt: serverTimestamp(),
   };
   try {
     await addDoc(txnsCol, payload);
