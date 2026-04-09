@@ -231,16 +231,16 @@ describe("children parity — Flask vs Firebase", () => {
   // ────────────────────────────────────────────────────────────────
   //
   // A fresh user (no children, not co-parenting anything) tries to
-  // read the pair's child on both backends. Both must reject, even
-  // though the shapes differ:
+  // read the pair's child on both backends. The semantic parity
+  // claim is "both backends refuse to disclose the child"; the test
+  // also pins the exact backend-specific rejection shapes so a
+  // future change — say, Flask switching to 403 or Firebase growing
+  // a null guard on the read rule — surfaces here immediately
+  // instead of silently drifting:
   //
   //   - Flask returns 404 (collapsed "not found" / "not yours").
   //   - Firebase raises `permission-denied` because the read rule
   //     requires `request.auth.uid in parentUids`.
-  //
-  // We don't assert on the exact shape of the rejection — the
-  // parity claim is "both backends refuse to disclose the child",
-  // which is what the test actually validates.
   it("a non-parent cannot read another parent's child on either backend", async () => {
     const stranger: ParityUser = await createParityUser({
       slug: "children-stranger",

@@ -219,24 +219,37 @@ export async function getFirebaseChild(input: {
 
 export interface FirebaseGetChildResult {
   ok: boolean;
-  /** Set when `ok === false`: either `not-found` or a Firestore error code. */
+  /** Set when `ok === false`: either `permission-denied` or `not-found`. */
   errorCode?: string;
   child?: NormalizedChild;
 }
 
 /**
  * Non-throwing `getFirebaseChild`. Returns a discriminated shape so
- * tests can assert on "the rule refused this read" or "the doc is
- * gone" without wrapping every call in try/catch.
+ * tests can assert on "the backend refused this read" without having
+ * to wrap every call in try/catch.
  *
- * Error shapes:
- *   - rule denial  → `{ ok: false, errorCode: "permission-denied" }`
- *   - doc missing  → `{ ok: false, errorCode: "not-found" }`
+ * Error shapes **under the current rule set**:
+ *   - non-parent read         → `{ ok: false, errorCode: "permission-denied" }`
+ *   - read of a deleted child → `{ ok: false, errorCode: "permission-denied" }`
  *
- * The distinction matters for the parity suite: a non-parent read
- * should hit rule denial (proving the security boundary), while a
- * post-delete read should hit `not-found` (proving the cascade took
- * the child doc out).
+ * Both failure modes collapse to `permission-denied` because the
+ * children READ rule (`firestore.rules:78`) dereferences
+ * `resource.data.parentUids` without a null guard. On a missing doc,
+ * `resource` is null and the rule errors out before Firestore can
+ * surface "doc doesn't exist" — the SDK reports permission-denied.
+ * See the `deleteFirebaseChild` note below for the longer version.
+ *
+ * Consequence: **this helper cannot be used to verify post-delete
+ * absence**. Use `awaitFirebaseChildDocAbsent` from `adminClient.ts`
+ * for that — admin SDK bypasses rules and returns a faithful
+ * "exists / doesn't exist" signal.
+ *
+ * The `not-found` branch below is kept as forward-compat: if the
+ * rule ever gains a `resource != null` guard, a post-delete read by
+ * a legitimate parent would start returning `!snap.exists()` cleanly
+ * and this branch would activate. Until then it's unreachable for
+ * `children/{id}` reads, and the inline comment says so.
  */
 export async function tryGetFirebaseChild(input: {
   user: FirebaseUserHandle;
@@ -245,6 +258,10 @@ export async function tryGetFirebaseChild(input: {
   try {
     const snap = await getDoc(doc(input.user.db, "children", input.childId));
     if (!snap.exists()) {
+      // Unreachable under the current children read rule (the rule
+      // errors out before we get here on a missing doc). Kept as
+      // forward-compat in case the rule grows a null guard — see the
+      // docstring above.
       return { ok: false, errorCode: "not-found" };
     }
     return { ok: true, child: normalizeFirebaseChild(snap.data()) };
