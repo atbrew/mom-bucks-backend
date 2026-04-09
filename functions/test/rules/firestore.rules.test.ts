@@ -344,6 +344,116 @@ describe("children/{childId}/transactions/{txnId}", () => {
       }),
     );
   });
+
+  // ─── WITHDRAW overspend guard ─────────────────────────────────────
+  //
+  // Synchronous rejection of WITHDRAWs that would drive the balance
+  // negative. The trigger (`onTransactionCreate` #15) fires AFTER the
+  // doc write, so the only place we can refuse synchronously is here
+  // in the rules layer. The trigger's clamp-at-zero path remains as
+  // defense-in-depth for Admin-SDK writers and concurrent-write races.
+  describe("WITHDRAW overspend guard", () => {
+    it("allows a WITHDRAW when amount is less than balance", async () => {
+      await seedChild("sam", ["alice"], { balance: 1000 });
+      const alice = env.authenticatedContext("alice").firestore();
+      await assertSucceeds(
+        setDoc(doc(alice, "children/sam/transactions/t1"), {
+          amount: 400,
+          type: "WITHDRAW",
+          description: "treat",
+          createdByUid: "alice",
+        }),
+      );
+    });
+
+    it("allows a WITHDRAW that exactly drains the balance to zero", async () => {
+      await seedChild("sam", ["alice"], { balance: 1000 });
+      const alice = env.authenticatedContext("alice").firestore();
+      await assertSucceeds(
+        setDoc(doc(alice, "children/sam/transactions/t1"), {
+          amount: 1000,
+          type: "WITHDRAW",
+          description: "payout",
+          createdByUid: "alice",
+        }),
+      );
+    });
+
+    it("denies a WITHDRAW when amount exceeds balance", async () => {
+      await seedChild("sam", ["alice"], { balance: 500 });
+      const alice = env.authenticatedContext("alice").firestore();
+      await assertFails(
+        setDoc(doc(alice, "children/sam/transactions/t1"), {
+          amount: 501,
+          type: "WITHDRAW",
+          description: "overspend by one cent",
+          createdByUid: "alice",
+        }),
+      );
+    });
+
+    it("denies a WITHDRAW from a child with zero balance", async () => {
+      await seedChild("sam", ["alice"]); // default balance: 0
+      const alice = env.authenticatedContext("alice").firestore();
+      await assertFails(
+        setDoc(doc(alice, "children/sam/transactions/t1"), {
+          amount: 100,
+          type: "WITHDRAW",
+          description: "cold wallet",
+          createdByUid: "alice",
+        }),
+      );
+    });
+
+    it("allows a LODGE even when the current balance is zero", async () => {
+      // The overspend check must only apply to WITHDRAWs. A LODGE of
+      // any amount against a fresh child must continue to work.
+      await seedChild("sam", ["alice"]);
+      const alice = env.authenticatedContext("alice").firestore();
+      await assertSucceeds(
+        setDoc(doc(alice, "children/sam/transactions/t1"), {
+          amount: 99999,
+          type: "LODGE",
+          description: "seed",
+          createdByUid: "alice",
+        }),
+      );
+    });
+
+    // The overspend guard's correctness depends on `amount` being a
+    // non-negative number. Without the shape check, a client could
+    // send `{amount: -100, type: 'WITHDRAW'}` and the `amount <=
+    // balance` test is trivially true for any non-negative balance —
+    // the doc lands, the trigger's defensive negative-amount check
+    // fires and returns without updating the balance, and we're left
+    // with an orphan transaction record. These two cases lock the
+    // shape check in at the rules layer.
+    it("denies creating a WITHDRAW with a negative amount", async () => {
+      await seedChild("sam", ["alice"], { balance: 1000 });
+      const alice = env.authenticatedContext("alice").firestore();
+      await assertFails(
+        setDoc(doc(alice, "children/sam/transactions/t1"), {
+          amount: -100,
+          type: "WITHDRAW",
+          description: "negative withdraw",
+          createdByUid: "alice",
+        }),
+      );
+    });
+
+    it("denies creating a LODGE with a negative amount", async () => {
+      await seedChild("sam", ["alice"], { balance: 1000 });
+      const alice = env.authenticatedContext("alice").firestore();
+      await assertFails(
+        setDoc(doc(alice, "children/sam/transactions/t1"), {
+          amount: -100,
+          type: "LODGE",
+          description: "negative lodge",
+          createdByUid: "alice",
+        }),
+      );
+    });
+  });
 });
 
 // ─── children/{childId}/activities/{activityId} ─────────────────────

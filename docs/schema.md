@@ -197,6 +197,17 @@ Full rules live in `firestore.rules`. The model in plain English:
   rule does a `get(/databases/.../children/$(childId)).data.parentUids`
   lookup. That's an extra read per query, but listeners only re-fire on
   changes, so this stays cheap at our scale.
+- `children/{childId}/transactions/**` additionally enforces two
+  guards on create: (a) `amount` must be a non-negative number
+  (shape check — without it, a client could send a negative-amount
+  WITHDRAW and bypass the overspend test below), and (b) a `WITHDRAW`
+  whose `amount` exceeds the parent child's current `balance` is
+  rejected synchronously. Both have to live in the rules because
+  `onTransactionCreate` (#15) fires after the doc has already been
+  written — refusal at the trigger can't un-do the write. The
+  trigger's clamp-at-zero path remains as defense-in-depth for
+  Admin-SDK writers (which bypass rules) and concurrent-WITHDRAW
+  races.
 - `invites/{token}` — readable unauthenticated (URL is the secret),
   not directly writable.
 
