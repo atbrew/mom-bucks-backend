@@ -9,10 +9,18 @@
  * anything at the data layer); the email match is purely a naming
  * convention for humans. Neither side knows about the other.
  *
- * Emails are generated as `contract-<slug>-<timestamp>@example.test`
+ * Emails are generated as `contract-<slug>-<n>-<timestamp>@mombucks-contract.dev`
  * so each test run gets a fresh namespace. Flask's Postgres is wiped
  * by the ephemeral volume between runs; the Auth emulator in
  * Firestore loses state when the emulator stops.
+ *
+ * Why `.dev` and not `.test` / `.example`: Flask uses the Python
+ * `email-validator` package, which rejects RFC 2606 reserved TLDs
+ * (`.test`, `.example`, `.invalid`, `.localhost`) as "special-use or
+ * reserved". `.dev` is a real ICANN gTLD so it passes validation,
+ * and `mombucks-contract.dev` is namespaced enough that it will
+ * never collide with a real address if one of these emails somehow
+ * leaked out of the test sandbox.
  */
 
 import {
@@ -53,7 +61,7 @@ let counter = 0;
  */
 export function makeContractEmail(slug: string): string {
   counter += 1;
-  return `contract-${slug}-${counter}-${Date.now()}@example.test`;
+  return `contract-${slug}-${counter}-${Date.now()}@mombucks-contract.dev`;
 }
 
 /**

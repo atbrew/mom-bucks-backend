@@ -40,7 +40,7 @@
       "port": 8080
     },
     "functions": {
-      "port": 5001
+      "port": 5005
     },
     "storage": {
       "port": 9199

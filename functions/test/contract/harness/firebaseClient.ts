@@ -57,7 +57,6 @@ import {
   collection,
   addDoc,
   type Firestore,
-  FirestoreError,
 } from "firebase/firestore";
 import {
   NormalizedChild,
@@ -230,6 +229,24 @@ export interface FirebaseCreateTransactionResult {
 }
 
 /**
+ * Narrow an unknown thrown value to a Firestore-style error code
+ * (e.g. "permission-denied"). Uses duck typing on the `.code`
+ * property rather than `instanceof FirestoreError` because the
+ * client SDK can be loaded through multiple module entrypoints
+ * ("firebase/firestore", the bundled lite entry, etc.) and
+ * `instanceof` silently mis-reports when two copies of the class
+ * are in play. The shape of a real FirebaseError is stable even
+ * across those copies, so structural checks are safer here.
+ */
+function extractFirestoreErrorCode(err: unknown): string | undefined {
+  if (err && typeof err === "object" && "code" in err) {
+    const code = (err as { code?: unknown }).code;
+    if (typeof code === "string") return code;
+  }
+  return undefined;
+}
+
+/**
  * Write a transaction doc. Catches Firestore PermissionDenied so
  * the overspend test can assert "the rule rejected it" without a
  * try/catch at the call site.
@@ -256,8 +273,9 @@ export async function createFirebaseTransaction(
       transaction: normalizeFirebaseTransaction(payload),
     };
   } catch (err) {
-    if (err instanceof FirestoreError && err.code === "permission-denied") {
-      return { ok: false, errorCode: err.code };
+    const code = extractFirestoreErrorCode(err);
+    if (code === "permission-denied") {
+      return { ok: false, errorCode: code };
     }
     throw err;
   }

@@ -64,7 +64,13 @@ import {
 import { createParityPair, type ParityPair } from "./harness/testUser";
 
 describe("transactions parity — Flask vs Firebase", () => {
-  let pair: ParityPair;
+  // `pair` is declared non-null because every test body runs only
+  // after `beforeEach` has assigned it. The `afterEach` is the one
+  // exception — if `beforeEach` itself throws, `pair` is still
+  // undefined and cleanup needs to no-op instead of masking the
+  // real error with a secondary "Cannot read properties of
+  // undefined" trace.
+  let pair: ParityPair = undefined as unknown as ParityPair;
 
   beforeEach(async () => {
     pair = await createParityPair({
@@ -74,7 +80,10 @@ describe("transactions parity — Flask vs Firebase", () => {
   });
 
   afterEach(async () => {
-    await pair.cleanup();
+    if (pair) {
+      await pair.cleanup();
+    }
+    pair = undefined as unknown as ParityPair;
   });
 
   // ────────────────────────────────────────────────────────────────
@@ -114,11 +123,22 @@ describe("transactions parity — Flask vs Firebase", () => {
   // ────────────────────────────────────────────────────────────────
   // 2. WITHDRAW (within balance)
   // ────────────────────────────────────────────────────────────────
+  //
+  // The subtle bit here: on the Firebase side, the WITHDRAW rule
+  // does a `get()` on `child.balance` to enforce the overspend
+  // guard, but that balance is updated *asynchronously* by the
+  // `onTransactionCreate` trigger. If we fire the WITHDRAW before
+  // the trigger has landed the LODGE, the rule reads `balance=0`
+  // and rejects with permission-denied. So between every step we
+  // `awaitFirebaseBalance` to the new expected value before
+  // continuing. Flask updates its balance synchronously in the
+  // request handler so it doesn't need the wait.
   it("LODGE then WITHDRAW leaves the expected balance on both backends", async () => {
-    for (const { type, amountCents } of [
-      { type: "LODGE", amountCents: 2000 },
-      { type: "WITHDRAW", amountCents: 750 },
-    ] as const) {
+    const steps = [
+      { type: "LODGE" as const, amountCents: 2000, runningCents: 2000 },
+      { type: "WITHDRAW" as const, amountCents: 750, runningCents: 1250 },
+    ];
+    for (const { type, amountCents, runningCents } of steps) {
       const flaskWrite = await createFlaskTransaction({
         impersonateEmail: pair.user.email,
         childId: pair.flaskChildId,
@@ -136,6 +156,14 @@ describe("transactions parity — Flask vs Firebase", () => {
         description: `${type} ${amountCents}`,
       });
       expect(firebaseWrite.ok, `Firebase ${type} should succeed`).toBe(true);
+
+      // Wait for the trigger to land the new balance on the
+      // Firebase side before the next step's rule check fires.
+      await awaitFirebaseBalance({
+        user: pair.user.firebase,
+        childId: pair.firebaseChildId,
+        expectedCents: runningCents,
+      });
     }
 
     const flaskChild = await getFlaskChild(pair.user.email, pair.flaskChildId);
@@ -210,17 +238,22 @@ describe("transactions parity — Flask vs Firebase", () => {
   // ────────────────────────────────────────────────────────────────
   // 4. Sequence: LODGE 1000 → WITHDRAW 400 → LODGE 250 = 850
   // ────────────────────────────────────────────────────────────────
+  //
+  // Same `awaitFirebaseBalance` between steps as test 2 — the
+  // WITHDRAW's rule check must see the balance left behind by
+  // the preceding LODGE.
   it("a LODGE/WITHDRAW/LODGE sequence produces the same final balance", async () => {
     const steps = [
-      { type: "LODGE" as const, amountCents: 1000 },
-      { type: "WITHDRAW" as const, amountCents: 400 },
-      { type: "LODGE" as const, amountCents: 250 },
+      { type: "LODGE" as const, amountCents: 1000, runningCents: 1000 },
+      { type: "WITHDRAW" as const, amountCents: 400, runningCents: 600 },
+      { type: "LODGE" as const, amountCents: 250, runningCents: 850 },
     ];
     for (const step of steps) {
       const flaskWrite = await createFlaskTransaction({
         impersonateEmail: pair.user.email,
         childId: pair.flaskChildId,
-        ...step,
+        type: step.type,
+        amountCents: step.amountCents,
         description: `step ${step.type} ${step.amountCents}`,
       });
       expect(flaskWrite.ok).toBe(true);
@@ -228,10 +261,17 @@ describe("transactions parity — Flask vs Firebase", () => {
       const firebaseWrite = await createFirebaseTransaction({
         user: pair.user.firebase,
         childId: pair.firebaseChildId,
-        ...step,
+        type: step.type,
+        amountCents: step.amountCents,
         description: `step ${step.type} ${step.amountCents}`,
       });
       expect(firebaseWrite.ok).toBe(true);
+
+      await awaitFirebaseBalance({
+        user: pair.user.firebase,
+        childId: pair.firebaseChildId,
+        expectedCents: step.runningCents,
+      });
     }
 
     const flaskChild = await getFlaskChild(pair.user.email, pair.flaskChildId);
