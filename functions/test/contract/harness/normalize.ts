@@ -49,7 +49,7 @@ export interface NormalizedTransaction {
  * 2-decimal value; `Math.round` is sufficient.
  */
 export function centsFromDollars(dollars: number): number {
-  if (typeof dollars !== "number" || Number.isNaN(dollars)) {
+  if (!Number.isFinite(dollars)) {
     throw new TypeError(
       `centsFromDollars: expected finite number, got ${typeof dollars}: ${String(dollars)}`,
     );
