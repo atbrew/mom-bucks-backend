@@ -419,6 +419,40 @@ describe("children/{childId}/transactions/{txnId}", () => {
         }),
       );
     });
+
+    // The overspend guard's correctness depends on `amount` being a
+    // non-negative number. Without the shape check, a client could
+    // send `{amount: -100, type: 'WITHDRAW'}` and the `amount <=
+    // balance` test is trivially true for any non-negative balance —
+    // the doc lands, the trigger's defensive negative-amount check
+    // fires and returns without updating the balance, and we're left
+    // with an orphan transaction record. These two cases lock the
+    // shape check in at the rules layer.
+    it("denies creating a WITHDRAW with a negative amount", async () => {
+      await seedChild("sam", ["alice"], { balance: 1000 });
+      const alice = env.authenticatedContext("alice").firestore();
+      await assertFails(
+        setDoc(doc(alice, "children/sam/transactions/t1"), {
+          amount: -100,
+          type: "WITHDRAW",
+          description: "negative withdraw",
+          createdByUid: "alice",
+        }),
+      );
+    });
+
+    it("denies creating a LODGE with a negative amount", async () => {
+      await seedChild("sam", ["alice"], { balance: 1000 });
+      const alice = env.authenticatedContext("alice").firestore();
+      await assertFails(
+        setDoc(doc(alice, "children/sam/transactions/t1"), {
+          amount: -100,
+          type: "LODGE",
+          description: "negative lodge",
+          createdByUid: "alice",
+        }),
+      );
+    });
   });
 });
 

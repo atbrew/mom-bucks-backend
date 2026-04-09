@@ -113,11 +113,22 @@ service cloud.firestore {
       // ───────────────────────────────────────────────────────────
       //
       // READ/UPDATE/DELETE are any-parent, same as the rest of the
-      // child's subcollections. CREATE is where the overspend guard
-      // lives: a WITHDRAW whose `amount` exceeds the parent child's
-      // current `balance` is rejected synchronously at write time.
+      // child's subcollections. CREATE carries two guards:
       //
-      // Why the rule and not the trigger: `onTransactionCreate` (#15)
+      //   1. Shape: `amount` must be a non-negative number. Without
+      //      this the overspend check is meaningless — a client
+      //      could send `{amount: -100, type: 'WITHDRAW'}` and the
+      //      `amount <= balance` test is trivially true for any
+      //      non-negative balance. `onTransactionCreate` (#15) does
+      //      reject negative amounts defensively, but by then the
+      //      doc has already landed in the subcollection, leaving
+      //      an orphan record with no balance effect.
+      //
+      //   2. Overspend: a WITHDRAW whose `amount` exceeds the parent
+      //      child's current `balance` is rejected synchronously at
+      //      write time.
+      //
+      // Why these live in rules and not the trigger: the trigger
       // fires AFTER the doc has been written, so it cannot un-do the
       // write — the best it can do is clamp the resulting balance at
       // zero and log. Enforcing at the rules layer is the only place
@@ -129,6 +140,8 @@ service cloud.firestore {
         allow read, update, delete: if isChildParent(childId);
 
         allow create: if isChildParent(childId)
+                      && request.resource.data.amount is number
+                      && request.resource.data.amount >= 0
                       && (
                            request.resource.data.type != 'WITHDRAW'
                            || request.resource.data.amount <=
