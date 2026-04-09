@@ -64,13 +64,13 @@ import {
 import { createParityPair, type ParityPair } from "./harness/testUser";
 
 describe("transactions parity — Flask vs Firebase", () => {
-  // `pair` is declared non-null because every test body runs only
-  // after `beforeEach` has assigned it. The `afterEach` is the one
-  // exception — if `beforeEach` itself throws, `pair` is still
-  // undefined and cleanup needs to no-op instead of masking the
-  // real error with a secondary "Cannot read properties of
-  // undefined" trace.
-  let pair: ParityPair = undefined as unknown as ParityPair;
+  // Definite assignment assertion — `pair` is always reassigned in
+  // `beforeEach` before any test body reads it, so TypeScript can
+  // safely treat it as non-null in the test bodies. The `afterEach`
+  // below still has to handle the case where `beforeEach` threw and
+  // `pair` is runtime-undefined, which it does by capturing a local
+  // optional view before calling cleanup.
+  let pair!: ParityPair;
 
   beforeEach(async () => {
     pair = await createParityPair({
@@ -80,10 +80,16 @@ describe("transactions parity — Flask vs Firebase", () => {
   });
 
   afterEach(async () => {
-    if (pair) {
-      await pair.cleanup();
-    }
+    // Capture a view typed as optional so a `beforeEach` failure
+    // surfaces as its original error instead of a secondary
+    // "Cannot read properties of undefined" trace. The reassignment
+    // to undefined makes sure a subsequent `beforeEach` failure
+    // doesn't see a stale (already-torn-down) pair on the next run.
+    const current: ParityPair | undefined = pair;
     pair = undefined as unknown as ParityPair;
+    if (current) {
+      await current.cleanup();
+    }
   });
 
   // ────────────────────────────────────────────────────────────────
