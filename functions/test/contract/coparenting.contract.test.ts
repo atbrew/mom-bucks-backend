@@ -130,7 +130,7 @@ describe("co-parenting parity — Flask vs Firebase", () => {
         impersonateEmail: pair.user.email,
         childId: pair.flaskChildId,
       });
-      expect(members.length, "Flask should have 2 members").toBeGreaterThanOrEqual(2);
+      expect(members, "Flask should have exactly 2 members").toHaveLength(2);
       const creatorMember = members[0];
       const coParentMember = members.find(
         (m) => m.userId !== creatorMember.userId,
