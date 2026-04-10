@@ -464,3 +464,142 @@ export async function deleteFlaskActivity(input: {
     { impersonateEmail: input.impersonateEmail },
   );
 }
+
+// ─── Invites ──────────────────────────────────────────────────────
+//
+// Flask invites live at `/api/v1/family/invites`. They're keyed by
+// invite `id` (UUID) and scoped per-child like Firebase's. The
+// accept endpoint checks email match + PENDING status but does NOT
+// check that the inviter is still a parent (see the
+// revoked-parent-loophole test for the parity divergence).
+
+export interface FlaskCreatedInvite {
+  id: string;
+  childId: string;
+  status: string;
+}
+
+/**
+ * Issue a co-parenting invite on Flask. Returns the Flask invite ID
+ * (needed for accept/revoke). The invitee must be a registered
+ * Flask user whose email matches `inviteeEmail`.
+ */
+export async function createFlaskInvite(input: {
+  impersonateEmail: string;
+  childId: string;
+  inviteeEmail: string;
+}): Promise<FlaskCreatedInvite> {
+  const res = await callFlask<{ invite: unknown }>(
+    "POST",
+    "/api/v1/family/invites",
+    {
+      impersonateEmail: input.impersonateEmail,
+      body: {
+        child_id: input.childId,
+        invitee_email: input.inviteeEmail,
+      },
+    },
+  );
+  const invite = res.invite as {
+    id?: unknown;
+    child_id?: unknown;
+    status?: unknown;
+  };
+  if (typeof invite.id !== "string") {
+    throw new TypeError(
+      `createFlaskInvite: missing id: ${JSON.stringify(res)}`,
+    );
+  }
+  return {
+    id: invite.id,
+    childId: invite.child_id as string,
+    status: invite.status as string,
+  };
+}
+
+export interface FlaskAcceptInviteResult {
+  ok: boolean;
+  status: number;
+}
+
+/**
+ * Accept a Flask invite. Non-throwing so the contract test can
+ * observe 404 / 403 / 409 rejections without try/catch.
+ */
+export async function acceptFlaskInvite(input: {
+  impersonateEmail: string;
+  inviteId: string;
+}): Promise<FlaskAcceptInviteResult> {
+  const headers: Record<string, string> = {
+    "Content-Type": "application/json",
+    [TEST_AUTH_HEADER]: input.impersonateEmail,
+  };
+  const res = await fetch(
+    `${FLASK_BASE_URL}/api/v1/family/invites/${input.inviteId}/accept`,
+    { method: "POST", headers, body: JSON.stringify({}) },
+  );
+  return { ok: res.ok, status: res.status };
+}
+
+/**
+ * Revoke (delete) a Flask invite. Flask sets status to REVOKED
+ * and returns 204. Used for the stale-invite rejection test.
+ */
+export async function revokeFlaskInvite(input: {
+  impersonateEmail: string;
+  inviteId: string;
+}): Promise<void> {
+  await callFlask<void>(
+    "DELETE",
+    `/api/v1/family/invites/${input.inviteId}`,
+    { impersonateEmail: input.impersonateEmail },
+  );
+}
+
+/**
+ * Remove a family member from a child on Flask. Used by the
+ * revoked-parent-loophole test.
+ *
+ * Flask requires the caller to be an admin of the child, and
+ * refuses to remove the primary parent (`child.parent_id`).
+ * Returns nothing — the DELETE response has no body.
+ */
+export async function removeFlaskFamilyMember(input: {
+  impersonateEmail: string;
+  childId: string;
+  memberId: string;
+}): Promise<void> {
+  await callFlask<void>(
+    "DELETE",
+    `/api/v1/family/children/${input.childId}/members/${input.memberId}`,
+    { impersonateEmail: input.impersonateEmail },
+  );
+}
+
+/**
+ * List family members of a child. Used to find a co-parent's
+ * membership ID for the remove call.
+ */
+export async function listFlaskFamilyMembers(input: {
+  impersonateEmail: string;
+  childId: string;
+}): Promise<Array<{ id: string; userId: string }>> {
+  const res = await callFlask<{ members: unknown[] }>(
+    "GET",
+    `/api/v1/family/children/${input.childId}/members`,
+    { impersonateEmail: input.impersonateEmail },
+  );
+  return res.members.map((m) => {
+    const obj = m as { id?: unknown; user_id?: unknown };
+    if (typeof obj.id !== "string" && typeof obj.id !== "number") {
+      throw new TypeError(`listFlaskFamilyMembers: member missing id`);
+    }
+    if (typeof obj.user_id !== "string" && typeof obj.user_id !== "number") {
+      throw new TypeError(`listFlaskFamilyMembers: member missing user_id`);
+    }
+    return {
+      id: String(obj.id),
+      userId: String(obj.user_id),
+    };
+  });
+}
