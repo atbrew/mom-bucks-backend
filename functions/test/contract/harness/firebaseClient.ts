@@ -54,16 +54,20 @@ import {
   doc,
   setDoc,
   getDoc,
+  getDocs,
   updateDoc,
   deleteDoc,
   collection,
   addDoc,
   serverTimestamp,
+  Timestamp,
   type Firestore,
 } from "firebase/firestore";
 import {
+  NormalizedActivity,
   NormalizedChild,
   NormalizedTransaction,
+  normalizeFirebaseActivity,
   normalizeFirebaseChild,
   normalizeFirebaseTransaction,
 } from "./normalize";
@@ -383,6 +387,200 @@ export async function createFirebaseTransaction(
     }
     throw err;
   }
+}
+
+// ─── Activities ─────────────────────────────────────────────────────
+//
+// Parity note: Flask has a server-side `claim` endpoint that bundles
+// (create-LODGE-txn + bump-balance + recycle-activity-to-LOCKED) into
+// one atomic request. Firebase has no equivalent Cloud Function —
+// the client is responsible for issuing the same three writes in
+// sequence, and `onTransactionCreate` (#15) handles the balance
+// recompute asynchronously. The `claimFirebaseActivity` helper below
+// reproduces that client-side protocol faithfully so the contract
+// test can call it with the same `{childId, activityId, reward}`
+// arguments on both sides and end up in the same state.
+
+export interface FirebaseCreateActivityInput {
+  user: FirebaseUserHandle;
+  childId: string;
+  title: string;
+  rewardCents: number;
+  type: "BOUNTY_RECURRING" | "ALLOWANCE" | "INTEREST";
+  status: "LOCKED" | "READY";
+  /** YYYY-MM-DD — stored as a Firestore Timestamp at UTC midnight. */
+  dueDate: string;
+}
+
+/**
+ * Create an activity doc under `children/{id}/activities/{newId}`.
+ * Writes the canonical shape from `transform.ts` (title, reward in
+ * cents, type, status, dueDate, createdAt, claimedAt:null) so the
+ * doc is indistinguishable from a backfilled one.
+ *
+ * The rules (`firestore.rules:162-164`) allow `isChildParent` to
+ * write anything under the activities subcollection, so there's no
+ * schema validation on the server side — the caller is trusted to
+ * seed the canonical fields. That's a known rule-surface weakness
+ * but out of scope for this contract suite (it's tested in
+ * `firestore.rules.test.ts`).
+ */
+export async function createFirebaseActivity(
+  input: FirebaseCreateActivityInput,
+): Promise<string> {
+  const activitiesCol = collection(
+    input.user.db,
+    "children",
+    input.childId,
+    "activities",
+  );
+  const ref = await addDoc(activitiesCol, {
+    title: input.title,
+    reward: input.rewardCents,
+    type: input.type,
+    status: input.status,
+    dueDate: Timestamp.fromDate(dueDateToUtcMidnight(input.dueDate)),
+    claimedAt: null,
+    createdAt: serverTimestamp(),
+  });
+  return ref.id;
+}
+
+/**
+ * Parse a YYYY-MM-DD string into a UTC-midnight Date so the
+ * Firestore Timestamp round-trips back to the same calendar day
+ * via `extractDueDate` in `normalize.ts`, regardless of the host
+ * timezone. Using `new Date("YYYY-MM-DD")` directly is already UTC
+ * under ECMA-262, but being explicit is clearer and avoids a
+ * surprise if Node ever tightens the parser.
+ */
+function dueDateToUtcMidnight(ymd: string): Date {
+  const [y, m, d] = ymd.split("-").map((s) => parseInt(s, 10));
+  return new Date(Date.UTC(y, m - 1, d));
+}
+
+/**
+ * List all activities under a child via the client SDK. Goes
+ * through the rules (`isChildParent`), so a non-parent will throw.
+ */
+export async function listFirebaseActivities(input: {
+  user: FirebaseUserHandle;
+  childId: string;
+}): Promise<NormalizedActivity[]> {
+  const activitiesCol = collection(
+    input.user.db,
+    "children",
+    input.childId,
+    "activities",
+  );
+  const snap = await getDocs(activitiesCol);
+  return snap.docs.map((d) => normalizeFirebaseActivity(d.data()));
+}
+
+export interface FirebaseListActivitiesResult {
+  ok: boolean;
+  errorCode?: string;
+  activities?: NormalizedActivity[];
+}
+
+/**
+ * Non-throwing list for the non-parent access test. The children
+ * activities rule is `isChildParent(childId)` which does a `get()`
+ * on the parent child doc — a non-parent trips that check and gets
+ * `permission-denied` from the SDK.
+ */
+export async function tryListFirebaseActivities(input: {
+  user: FirebaseUserHandle;
+  childId: string;
+}): Promise<FirebaseListActivitiesResult> {
+  try {
+    const activitiesCol = collection(
+      input.user.db,
+      "children",
+      input.childId,
+      "activities",
+    );
+    const snap = await getDocs(activitiesCol);
+    return {
+      ok: true,
+      activities: snap.docs.map((d) => normalizeFirebaseActivity(d.data())),
+    };
+  } catch (err) {
+    const code = extractFirestoreErrorCode(err);
+    if (code === "permission-denied") {
+      return { ok: false, errorCode: code };
+    }
+    throw err;
+  }
+}
+
+export interface FirebaseClaimActivityInput {
+  user: FirebaseUserHandle;
+  childId: string;
+  activityId: string;
+  rewardCents: number;
+  description: string;
+  /** YYYY-MM-DD for where to land the recycled activity. */
+  nextDueDate: string;
+}
+
+/**
+ * Client-orchestrated claim: create a LODGE transaction doc for the
+ * reward, then update the activity to LOCKED with the next due date.
+ * The caller supplies `nextDueDate` explicitly so both backends
+ * compute it the same way — Flask uses its own recurrence logic
+ * server-side, and this helper would have to duplicate that to match
+ * otherwise. The contract test computes the expected date once
+ * (`addDays(today, 7)` for a WEEKLY bounty) and passes the same
+ * value to both sides' claim helpers.
+ *
+ * Does NOT wait for `onTransactionCreate` to finish — the caller
+ * uses `awaitFirebaseBalance` to sync up on the balance before
+ * asserting.
+ */
+export async function claimFirebaseActivity(
+  input: FirebaseClaimActivityInput,
+): Promise<void> {
+  // 1. LODGE transaction for the reward. onTransactionCreate (#15)
+  //    will pick this up and bump the child's balance.
+  const txnsCol = collection(
+    input.user.db,
+    "children",
+    input.childId,
+    "transactions",
+  );
+  await addDoc(txnsCol, {
+    amount: input.rewardCents,
+    type: "LODGE",
+    description: input.description,
+    createdByUid: input.user.uid,
+    createdAt: serverTimestamp(),
+  });
+
+  // 2. Recycle the activity: status=LOCKED, advance dueDate, clear
+  //    claimedAt. This mirrors Flask's `_recycle_into_next_due`.
+  await updateDoc(
+    doc(input.user.db, "children", input.childId, "activities", input.activityId),
+    {
+      status: "LOCKED",
+      dueDate: Timestamp.fromDate(dueDateToUtcMidnight(input.nextDueDate)),
+      claimedAt: null,
+    },
+  );
+}
+
+/**
+ * Delete an activity doc. Parity with Flask's bounty delete — both
+ * hard-remove the record.
+ */
+export async function deleteFirebaseActivity(input: {
+  user: FirebaseUserHandle;
+  childId: string;
+  activityId: string;
+}): Promise<void> {
+  await deleteDoc(
+    doc(input.user.db, "children", input.childId, "activities", input.activityId),
+  );
 }
 
 /**

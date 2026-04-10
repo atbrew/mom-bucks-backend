@@ -32,8 +32,10 @@
 
 import { FLASK_BASE_URL } from "./bootFlask";
 import {
+  NormalizedActivity,
   NormalizedChild,
   NormalizedTransaction,
+  normalizeFlaskActivity,
   normalizeFlaskChild,
   normalizeFlaskTransaction,
 } from "./normalize";
@@ -279,4 +281,186 @@ export async function createFlaskTransaction(
     status: res.status,
     transaction: normalizeFlaskTransaction(body.transaction),
   };
+}
+
+// ─── Activities ─────────────────────────────────────────────────────
+//
+// Flask exposes bounty-style activities through
+// `POST /api/v1/children/:child_id/activities` (create),
+// `GET    .../activities`                      (list + lazy generate),
+// `POST   .../activities/:aid/claim`           (claim + recycle),
+// `DELETE .../activities/:aid`                 (delete bounty).
+//
+// Only BOUNTY_RECURRING activities are user-creatable/deletable
+// (see `bounty_id is None` guards in `activities.py`). ALLOWANCE and
+// INTEREST activities are generated server-side and are out of scope
+// for the contract suite — there's no Firebase-side equivalent of
+// lazy allowance generation yet, and parity-testing a cron is a
+// different kind of test.
+
+export interface FlaskCreateActivityInput {
+  impersonateEmail: string;
+  childId: string;
+  description: string;
+  amountCents: number;
+  /** Must be DAILY/WEEKLY/FORTNIGHTLY/MONTHLY — Flask rejects anything else. */
+  recurrence: "DAILY" | "WEEKLY" | "FORTNIGHTLY" | "MONTHLY";
+  /** YYYY-MM-DD. Flask defaults to "today" if omitted, which hurts
+   * parity determinism; the contract test always pins an explicit date. */
+  dueDate: string;
+}
+
+export interface FlaskCreatedActivity {
+  /** Opaque Flask activity ID — used for subsequent claim/delete calls. */
+  id: string;
+  activity: NormalizedActivity;
+}
+
+/**
+ * Create a BOUNTY_RECURRING activity. Returns both the raw Flask ID
+ * (needed to call claim/delete later) and the normalized shape for
+ * parity assertions.
+ */
+export async function createFlaskActivity(
+  input: FlaskCreateActivityInput,
+): Promise<FlaskCreatedActivity> {
+  const res = await callFlask<unknown>(
+    "POST",
+    `/api/v1/children/${input.childId}/activities`,
+    {
+      impersonateEmail: input.impersonateEmail,
+      body: {
+        description: input.description,
+        amount: input.amountCents / 100,
+        recurrence: input.recurrence,
+        due_date: input.dueDate,
+      },
+    },
+  );
+  const obj = res as { id?: unknown };
+  if (typeof obj.id !== "string") {
+    throw new TypeError(
+      `createFlaskActivity: missing id in response: ${JSON.stringify(res)}`,
+    );
+  }
+  return {
+    id: obj.id,
+    activity: normalizeFlaskActivity(res),
+  };
+}
+
+/**
+ * List activities for a child via `GET /api/v1/children/:id/activities`.
+ *
+ * Note: the list endpoint triggers lazy generation of ALLOWANCE
+ * activities if the child has an `allowance_config`. The contract
+ * tests never set one up, so the result is deterministically
+ * "whatever bounties the test wrote, in whatever server order".
+ * The caller is expected to search by title/id, not index.
+ */
+export async function listFlaskActivities(input: {
+  impersonateEmail: string;
+  childId: string;
+}): Promise<NormalizedActivity[]> {
+  const res = await callFlask<{ activities: unknown[] }>(
+    "GET",
+    `/api/v1/children/${input.childId}/activities`,
+    { impersonateEmail: input.impersonateEmail },
+  );
+  return res.activities.map(normalizeFlaskActivity);
+}
+
+export interface FlaskListActivitiesResult {
+  ok: boolean;
+  status: number;
+  activities?: NormalizedActivity[];
+}
+
+/**
+ * Non-throwing list for the non-parent access test. Flask returns
+ * 404 from `require_child_for_parent` when the caller isn't a parent
+ * of the child, matching the `tryGetFlaskChild` shape.
+ */
+export async function tryListFlaskActivities(input: {
+  impersonateEmail: string;
+  childId: string;
+}): Promise<FlaskListActivitiesResult> {
+  const headers: Record<string, string> = {
+    "Content-Type": "application/json",
+    [TEST_AUTH_HEADER]: input.impersonateEmail,
+  };
+  const res = await fetch(
+    `${FLASK_BASE_URL}/api/v1/children/${input.childId}/activities`,
+    { method: "GET", headers },
+  );
+  if (!res.ok) {
+    return { ok: false, status: res.status };
+  }
+  const body = (await res.json()) as { activities: unknown[] };
+  return {
+    ok: true,
+    status: res.status,
+    activities: body.activities.map(normalizeFlaskActivity),
+  };
+}
+
+export interface FlaskClaimActivityResult {
+  activity: NormalizedActivity | null;
+  newBalanceCents: number;
+  transaction: NormalizedTransaction;
+}
+
+/**
+ * Claim a READY activity. Flask does the full server-side dance:
+ * creates a LODGE transaction, bumps the child balance, and recycles
+ * the activity (status → LOCKED, due_date advanced by recurrence).
+ * The response body carries all three pieces of that outcome.
+ *
+ * The `activity` field is null only when the activity had no
+ * recurrence (Flask deletes one-off bounties on claim). The contract
+ * test always creates recurring bounties, so it gets a recycled
+ * activity back, but the return type allows for the other shape to
+ * keep the helper honest.
+ */
+export async function claimFlaskActivity(input: {
+  impersonateEmail: string;
+  childId: string;
+  activityId: string;
+}): Promise<FlaskClaimActivityResult> {
+  const res = await callFlask<{
+    activity: unknown;
+    new_balance: unknown;
+    transaction: unknown;
+  }>(
+    "POST",
+    `/api/v1/children/${input.childId}/activities/${input.activityId}/claim`,
+    { impersonateEmail: input.impersonateEmail, body: {} },
+  );
+  if (typeof res.new_balance !== "number") {
+    throw new TypeError(
+      `claimFlaskActivity: missing new_balance: ${JSON.stringify(res)}`,
+    );
+  }
+  return {
+    activity: res.activity ? normalizeFlaskActivity(res.activity) : null,
+    newBalanceCents: Math.round(res.new_balance * 100),
+    transaction: normalizeFlaskTransaction(res.transaction),
+  };
+}
+
+/**
+ * Delete a bounty activity. Flask returns 204 on success. Flask
+ * rejects with 404 if the target is an ALLOWANCE/INTEREST activity
+ * (bounty_id null) — the contract test only ever targets bounties.
+ */
+export async function deleteFlaskActivity(input: {
+  impersonateEmail: string;
+  childId: string;
+  activityId: string;
+}): Promise<void> {
+  await callFlask<void>(
+    "DELETE",
+    `/api/v1/children/${input.childId}/activities/${input.activityId}`,
+    { impersonateEmail: input.impersonateEmail },
+  );
 }
