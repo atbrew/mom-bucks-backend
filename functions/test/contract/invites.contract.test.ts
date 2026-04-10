@@ -256,7 +256,7 @@ describe("invites parity — Flask vs Firebase", () => {
       // Firebase: create with past expiresAt. The create rule
       // requires expiresAt > request.time, so we use the admin SDK
       // (via adminClient) to write it directly, bypassing rules.
-      const expiredToken = `expired-test-${Date.now()}`;
+      const expiredToken = `expired-test-${crypto.randomUUID()}`;
       const adminDb = getAdminDb();
       await adminDb.collection("invites").doc(expiredToken).set({
         childId: pair.firebaseChildId,
@@ -366,6 +366,7 @@ describe("invites parity — Flask vs Firebase", () => {
       // isn't exposed by the harness, we look for the member whose
       // user_id differs from the first one (the creator is always
       // listed first per Flask's ORDER BY role, created_at).
+      expect(members.length, "Flask should have 2 members after co-parent accepted").toBeGreaterThanOrEqual(2);
       const creatorMember = members[0];
       const coParentMember = members.find(
         (m) => m.userId !== creatorMember.userId,

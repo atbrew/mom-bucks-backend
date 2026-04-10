@@ -562,7 +562,7 @@ export async function revokeFlaskInvite(input: {
  *
  * Flask requires the caller to be an admin of the child, and
  * refuses to remove the primary parent (`child.parent_id`).
- * Returns the member_id as a convenience for chaining.
+ * Returns nothing — the DELETE response has no body.
  */
 export async function removeFlaskFamilyMember(input: {
   impersonateEmail: string;
@@ -591,9 +591,15 @@ export async function listFlaskFamilyMembers(input: {
   );
   return res.members.map((m) => {
     const obj = m as { id?: unknown; user_id?: unknown };
+    if (typeof obj.id !== "string" && typeof obj.id !== "number") {
+      throw new TypeError(`listFlaskFamilyMembers: member missing id`);
+    }
+    if (typeof obj.user_id !== "string" && typeof obj.user_id !== "number") {
+      throw new TypeError(`listFlaskFamilyMembers: member missing user_id`);
+    }
     return {
-      id: obj.id as string,
-      userId: obj.user_id as string,
+      id: String(obj.id),
+      userId: String(obj.user_id),
     };
   });
 }
