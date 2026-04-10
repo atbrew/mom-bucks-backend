@@ -188,8 +188,9 @@ describe("activities parity — Flask vs Firebase", () => {
   it("claiming a bounty bumps balance, recycles the activity, and matches on both backends", async () => {
     const title = "Feed the cat";
     const rewardCents = 400;
-    const dueDate = toIsoDate(addUtcDays(new Date(), 30));
-    const nextDueDate = toIsoDate(addUtcDays(new Date(), 37));
+    const now = new Date();
+    const dueDate = toIsoDate(addUtcDays(now, 30));
+    const nextDueDate = toIsoDate(addUtcDays(now, 37));
 
     const flaskCreated = await createFlaskActivity({
       impersonateEmail: pair.user.email,

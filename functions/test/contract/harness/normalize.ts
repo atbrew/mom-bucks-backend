@@ -273,7 +273,11 @@ export function normalizeFirebaseActivity(raw: unknown): NormalizedActivity {
  * raw string. UTC slice of `toISOString()` gives YYYY-MM-DD.
  */
 function extractDueDate(value: unknown): string {
-  if (value && typeof value === "object" && "toDate" in value) {
+  if (
+    value &&
+    typeof value === "object" &&
+    typeof (value as { toDate?: unknown }).toDate === "function"
+  ) {
     const d = (value as { toDate: () => Date }).toDate();
     return d.toISOString().slice(0, 10);
   }
