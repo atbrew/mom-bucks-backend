@@ -55,13 +55,15 @@ single serial job.
 
 **Trigger:** Push to `main` (same path filter as PR check).
 
-**Prerequisite:** All three PR-check jobs pass (duplicated as a gate,
-or extracted as a reusable workflow).
+**Prerequisite:** All three PR-check jobs pass via `workflow_call`
+(the deploy workflow calls `firebase-ci.yml` as a reusable workflow
+rather than duplicating the gate jobs — keeps them DRY so the PR
+check and deploy gate never drift apart).
 
 **Jobs:**
 
-1. **Gate: lint + typecheck + build + unit tests + rules tests**
-2. **Deploy** (ubuntu-latest, Node 22)
+1. **Gate:** `uses: ./.github/workflows/firebase-ci.yml`
+2. **Deploy** (needs: gate, ubuntu-latest, Node 22)
 
    a. Authenticate to Firebase using a service account key
       (`FIREBASE_SA_KEY_DEV` secret).
@@ -110,8 +112,8 @@ mom-bucks pattern.
 
 **Jobs:**
 
-1. **Gate: Full test suite** (lint + typecheck + build + unit + rules)
-2. **Deploy** (same as dev, but `--project mom-bucks-prod-81096`)
+1. **Gate:** `uses: ./.github/workflows/firebase-ci.yml`
+2. **Deploy** (needs: gate, same as dev but `--project mom-bucks-prod-81096`)
    - Uses `FIREBASE_SA_KEY_PROD` secret
    - Writes production hosting page (`<title>Mom Bucks</title>`)
    - Runs `mb smoke-test --project prod` as mandatory verification
@@ -131,17 +133,13 @@ Pull Request to main
 
 Push to main (merge)
   └─ deploy-dev.yml
-       ├─ lint-typecheck-build (gate)
-       ├─ unit-tests (gate)
-       ├─ rules-tests (gate)
+       ├─ gate (uses: firebase-ci.yml via workflow_call)
        ├─ deploy → mom-bucks-dev-b3772 (--skip-predeploy)
        └─ smoke-test → mb smoke-test (mandatory)
 
 Manual trigger
   └─ deploy-prod.yml
-       ├─ lint-typecheck-build (gate)
-       ├─ unit-tests (gate)
-       ├─ rules-tests (gate)
+       ├─ gate (uses: firebase-ci.yml via workflow_call)
        ├─ deploy → mom-bucks-prod-81096 (--skip-predeploy)
        ├─ smoke-test → mb smoke-test --project prod (mandatory)
        └─ tag → firebase-prod-YYYY-MM-DD
@@ -234,6 +232,23 @@ the Android app would.
 - Creating test users (Firebase Auth `createUser` — can't self-
   register via REST without the client SDK)
 - Cleanup (deleting test users and documents after `smoke-test`)
+
+**Cleanup must be wrapped in `try/finally`.** If the smoke test
+fails halfway through (e.g. a rules assertion fails after creating
+a user + child), the Admin SDK cleanup must still run. Orphaned
+test users ("Alice", "Sam") polluting the dev database after a
+failed CI run is unacceptable. The `smoke-test` command structure:
+
+```python
+admin = AdminClient(project)
+try:
+    user = admin.create_test_user(...)
+    client = ClientAuth(user)
+    # ... exercise auth + rules + callables ...
+    # ... assertions ...
+finally:
+    admin.cleanup()  # always runs, even on failure
+```
 
 This split means a successful smoke test proves that auth, rules,
 and callables are all working in harmony — not just that the
