@@ -577,6 +577,27 @@ export async function removeFlaskFamilyMember(input: {
 }
 
 /**
+ * Non-throwing variant of `removeFlaskFamilyMember`. Returns
+ * `{ ok, status }` so the caller can assert on rejection codes
+ * (e.g. 403 for primary-parent removal).
+ */
+export async function tryRemoveFlaskFamilyMember(input: {
+  impersonateEmail: string;
+  childId: string;
+  memberId: string;
+}): Promise<{ ok: boolean; status: number }> {
+  const headers: Record<string, string> = {
+    "Content-Type": "application/json",
+    [TEST_AUTH_HEADER]: input.impersonateEmail,
+  };
+  const res = await fetch(
+    `${FLASK_BASE_URL}/api/v1/family/children/${input.childId}/members/${input.memberId}`,
+    { method: "DELETE", headers },
+  );
+  return { ok: res.ok, status: res.status };
+}
+
+/**
  * List family members of a child. Used to find a co-parent's
  * membership ID for the remove call.
  */
