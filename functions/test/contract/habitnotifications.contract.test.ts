@@ -258,6 +258,38 @@ describe("habit notifications parity — Firebase shouldNotifyForConfig vs Flask
       expect(firebase, "Firebase: DAILY next-day fire").toBe(true);
       expect(flask, "Flask: DAILY next-day fire").toBe(true);
     });
+
+    // Midnight-boundary divergence: Firebase uses sameCalendarDay
+    // (fires as soon as the calendar date rolls over), Flask uses a
+    // 20-hour cooldown window. When the last fire was late in the
+    // evening, Firebase fires after midnight (< 20h elapsed) but
+    // Flask's cooldown hasn't expired yet.
+    //
+    // In practice this doesn't surface because Flask's 9 AM
+    // local-time gate means the scheduler never evaluates within a
+    // few hours of a late-evening fire. But the raw decision
+    // functions disagree at this boundary.
+    it("Firebase fires after midnight; Flask still in cooldown (midnight-boundary divergence)", () => {
+      // Last fire at 23:30 UTC yesterday — 9.5 hours before NOW (09:00 UTC).
+      const lateLastNight = new Date(Date.UTC(2026, 3, 7, 23, 30, 0));
+      const firebase = firebaseShouldNotify({
+        frequency: "DAILY",
+        dayOfWeek: 0,
+        now: NOW,
+        lastGeneratedAt: lateLastNight,
+      });
+      const flask = flaskShouldNotify({
+        frequency: "DAILY",
+        allowanceDay: 0,
+        now: NOW,
+        lastNotifiedAt: lateLastNight,
+        configCreatedAt: null,
+      });
+      // Firebase: different calendar day → fire.
+      expect(firebase, "Firebase fires (different calendar day)").toBe(true);
+      // Flask: 9.5h < 20h cooldown → suppress.
+      expect(flask, "Flask suppresses (20h cooldown not elapsed)").toBe(false);
+    });
   });
 
   // ──────────────────────────────────────────────────────────────
