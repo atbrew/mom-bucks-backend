@@ -64,6 +64,12 @@ import {
   type Firestore,
 } from "firebase/firestore";
 import {
+  getFunctions,
+  connectFunctionsEmulator,
+  httpsCallable,
+  type Functions,
+} from "firebase/functions";
+import {
   NormalizedActivity,
   NormalizedChild,
   NormalizedTransaction,
@@ -76,6 +82,8 @@ import {
 const AUTH_EMULATOR_HOST = "http://127.0.0.1:9099";
 const FIRESTORE_EMULATOR_HOST = "127.0.0.1";
 const FIRESTORE_EMULATOR_PORT = 8080;
+const FUNCTIONS_EMULATOR_HOST = "127.0.0.1";
+const FUNCTIONS_EMULATOR_PORT = 5005;
 
 // Any project ID that starts with `demo-` forces the Firebase SDKs
 // into demo mode (no credentials, no network to real Firebase).
@@ -89,6 +97,7 @@ export interface FirebaseUserHandle {
   app: FirebaseApp;
   auth: Auth;
   db: Firestore;
+  functions: Functions;
   /** Release the Firebase app so its internal listeners shut down. */
   cleanup(): Promise<void>;
 }
@@ -99,7 +108,12 @@ export interface FirebaseUserHandle {
  * Each test user gets its own instance so sign-in state doesn't
  * bleed across parallel tests.
  */
-function buildEmulatorApp(): { app: FirebaseApp; auth: Auth; db: Firestore } {
+function buildEmulatorApp(): {
+  app: FirebaseApp;
+  auth: Auth;
+  db: Firestore;
+  functions: Functions;
+} {
   const name = `contract-app-${++appCounter}-${Date.now()}`;
   const app = initializeApp(
     { projectId: CONTRACT_PROJECT_ID, apiKey: "fake-api-key" },
@@ -109,7 +123,9 @@ function buildEmulatorApp(): { app: FirebaseApp; auth: Auth; db: Firestore } {
   connectAuthEmulator(auth, AUTH_EMULATOR_HOST, { disableWarnings: true });
   const db = getFirestore(app);
   connectFirestoreEmulator(db, FIRESTORE_EMULATOR_HOST, FIRESTORE_EMULATOR_PORT);
-  return { app, auth, db };
+  const functions = getFunctions(app, "us-central1");
+  connectFunctionsEmulator(functions, FUNCTIONS_EMULATOR_HOST, FUNCTIONS_EMULATOR_PORT);
+  return { app, auth, db, functions };
 }
 
 /**
@@ -122,7 +138,7 @@ export async function createFirebaseUser(input: {
   password: string;
   name: string;
 }): Promise<FirebaseUserHandle> {
-  const { app, auth, db } = buildEmulatorApp();
+  const { app, auth, db, functions } = buildEmulatorApp();
   const cred = await createUserWithEmailAndPassword(
     auth,
     input.email,
@@ -144,6 +160,7 @@ export async function createFirebaseUser(input: {
     app,
     auth,
     db,
+    functions,
     async cleanup() {
       await deleteApp(app);
     },
@@ -161,7 +178,7 @@ export async function signInFirebaseUser(input: {
   email: string;
   password: string;
 }): Promise<FirebaseUserHandle> {
-  const { app, auth, db } = buildEmulatorApp();
+  const { app, auth, db, functions } = buildEmulatorApp();
   const cred = await signInWithEmailAndPassword(
     auth,
     input.email,
@@ -173,6 +190,7 @@ export async function signInFirebaseUser(input: {
     app,
     auth,
     db,
+    functions,
     async cleanup() {
       await deleteApp(app);
     },
@@ -615,4 +633,130 @@ export async function awaitFirebaseBalance(input: {
   throw new Error(
     `Firebase child ${input.childId} did not reach balance=${input.expectedCents} in time; last=${JSON.stringify(last)}`,
   );
+}
+
+// ─── Invites ──────────────────────────────────────────────────────
+//
+// Firebase invites live as top-level `invites/{token}` docs. The
+// doc ID is the sharing secret. Clients create invites directly
+// (the rules validate shape), and acceptance goes through the
+// `acceptInvite` callable (#13) which runs in a Firestore
+// transaction to atomically verify expiry / consumed / inviter
+// membership, then `arrayUnion` the acceptor into the child's
+// `parentUids`.
+
+/**
+ * Create an invite doc directly via the client SDK. The create rule
+ * (`firestore.rules:198-203`) requires `invitedByUid == auth.uid`,
+ * a non-empty string `childId`, `expiresAt > now`, and
+ * `acceptedByUid == null`.
+ *
+ * Returns the token (doc ID) used for subsequent accept calls.
+ */
+export async function createFirebaseInvite(input: {
+  user: FirebaseUserHandle;
+  childId: string;
+  invitedEmail: string | null;
+  expiresAt: Date;
+}): Promise<string> {
+  const invitesCol = collection(input.user.db, "invites");
+  const ref = await addDoc(invitesCol, {
+    childId: input.childId,
+    invitedByUid: input.user.uid,
+    invitedEmail: input.invitedEmail,
+    expiresAt: Timestamp.fromDate(input.expiresAt),
+    acceptedByUid: null,
+    acceptedAt: null,
+  });
+  return ref.id;
+}
+
+export interface FirebaseAcceptInviteResult {
+  ok: boolean;
+  childId?: string;
+  errorCode?: string;
+  errorMessage?: string;
+}
+
+/**
+ * Call the `acceptInvite` callable via the client SDK. The callable
+ * runs in the Functions emulator (wired up in `buildEmulatorApp`).
+ *
+ * Non-throwing: the contract test needs to observe rejection codes
+ * for expired / consumed / revoked-parent cases without wrapping
+ * every call in try/catch.
+ */
+export async function callAcceptInvite(input: {
+  user: FirebaseUserHandle;
+  token: string;
+}): Promise<FirebaseAcceptInviteResult> {
+  const fn = httpsCallable<{ token: string }, { childId: string }>(
+    input.user.functions,
+    "acceptInvite",
+  );
+  try {
+    const result = await fn({ token: input.token });
+    return { ok: true, childId: result.data.childId };
+  } catch (err) {
+    const code = extractFunctionsErrorCode(err);
+    const message = extractFunctionsErrorMessage(err);
+    return { ok: false, errorCode: code, errorMessage: message };
+  }
+}
+
+/**
+ * Call the `removeParentFromChildren` callable. Used by the
+ * revoked-parent-loophole test to strip a co-parent's access
+ * before attempting an invite accept.
+ */
+export async function callRemoveParentFromChildren(input: {
+  user: FirebaseUserHandle;
+  targetUid: string;
+  childIds: string[];
+}): Promise<{ removedFrom: string[]; skipped: unknown[] }> {
+  const fn = httpsCallable<
+    { targetUid: string; childIds: string[] },
+    { removedFrom: string[]; skipped: unknown[] }
+  >(input.user.functions, "removeParentFromChildren");
+  const result = await fn({
+    targetUid: input.targetUid,
+    childIds: input.childIds,
+  });
+  return result.data;
+}
+
+/**
+ * Delete an invite doc. The delete rule requires the caller to be
+ * the inviter (`resource.data.invitedByUid == request.auth.uid`).
+ * Used for revoke tests.
+ */
+export async function deleteFirebaseInvite(input: {
+  user: FirebaseUserHandle;
+  token: string;
+}): Promise<void> {
+  await deleteDoc(doc(input.user.db, "invites", input.token));
+}
+
+/**
+ * Extract an error code from a Firebase Functions callable error.
+ * The client SDK throws `FirebaseError` with `.code` like
+ * `"functions/not-found"` or `"functions/deadline-exceeded"`.
+ * We strip the `"functions/"` prefix for readability.
+ */
+function extractFunctionsErrorCode(err: unknown): string | undefined {
+  if (err && typeof err === "object" && "code" in err) {
+    const code = (err as { code?: unknown }).code;
+    if (typeof code === "string") {
+      return code.replace(/^functions\//, "");
+    }
+  }
+  return undefined;
+}
+
+function extractFunctionsErrorMessage(err: unknown): string | undefined {
+  if (err && typeof err === "object" && "message" in err) {
+    const msg = (err as { message?: unknown }).message;
+    if (typeof msg === "string") return msg;
+  }
+  return undefined;
 }

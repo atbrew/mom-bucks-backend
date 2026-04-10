@@ -62,7 +62,7 @@ let adminDb: Firestore | undefined;
  * admin-SDK write would silently hit the real Firebase project.
  * Failing loud is the only safe behaviour.
  */
-function getAdminDb(): Firestore {
+export function getAdminDb(): Firestore {
   if (adminDb) return adminDb;
   if (!process.env.FIRESTORE_EMULATOR_HOST) {
     throw new Error(
