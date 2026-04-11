@@ -414,6 +414,15 @@ Note: this phase touches `atbrew/mom-bucks` only. `mom-bucks-backend` is not yet
 - **Flask + Postgres decommission.** Deleting the old stack is a simple one-PR motion in `atbrew/mom-bucks` when the clients are moved over. No Postgres archive, no 48-hour bake, no rollback drill — development-mode data has no preservation requirement.
 - **Dual-write.** Not required for parity. The contract suite is the parity mechanism; dual-write (if it exists in `atbrew/mom-bucks` from Phase 2) can be turned off at any time with no cost.
 
+### Pre-prod checklist (before flipping clients over)
+
+Items to verify in the Firebase console / GCP before the first real users hit prod (`mom-bucks-prod-81096`). None of these are sequenced against a phase — they are one-off hardening steps.
+
+- **Email enumeration protection.** Firebase console → Authentication → Settings → User actions → enable **"Email enumeration protection"**. Without this, `signInWithPassword` and account-creation endpoints return distinct errors for "email not found" vs "wrong password", letting an attacker enumerate which emails have accounts. Turn it on in prod once clients are updated to handle the generic error. Leave it off in dev (`mom-bucks-dev-b3772`) so the `mb` CLI and developer flows keep the clearer errors.
+- **Budget alerts.** Re-confirm the $10/month Blaze budget alert on `mom-bucks-prod-81096` (issue #2).
+- **Branch protection on `main`.** Required: CI gate must pass, linear history, no force pushes. Already tracked as part of the CI/CD rollout.
+- **Service account key rotation policy.** Document who holds `FIREBASE_SA_KEY_PROD` and when it gets rotated.
+
 
 
 ## Critical Files

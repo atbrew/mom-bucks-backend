@@ -92,6 +92,42 @@ emulator. They live alongside Functions tests under `functions/test/`.
   user has 50+ children and read amplification becomes a concern, the
   forward-compatible escape hatch is a `setChildClaims` Cloud Function.
 
+## CI/CD
+
+Three GitHub Actions workflows in `.github/workflows/`:
+
+| Workflow | Trigger | What it does |
+|----------|---------|-------------|
+| `firebase-ci.yml` | PR to main, `workflow_call`, `workflow_dispatch` | Lint + typecheck + build, unit tests, rules tests (3 parallel jobs) |
+| `deploy-dev.yml` | Push to main | Runs CI gate, deploys to `mom-bucks-dev-b3772`, runs smoke test |
+| `deploy-prod.yml` | Manual (`workflow_dispatch`) | Runs CI gate, deploys to `mom-bucks-prod-81096`, runs smoke test, creates `firebase-prod-YYYY-MM-DD` tag |
+
+**Required GitHub secrets:**
+
+| Secret | Purpose |
+|--------|---------|
+| `FIREBASE_SA_KEY_DEV` | SA key JSON for deploy + Admin SDK (dev) |
+| `FIREBASE_SA_KEY_PROD` | SA key JSON for deploy + Admin SDK (prod) |
+| `FIREBASE_WEB_API_KEY_DEV` | Web API key for REST auth sign-in (dev) |
+| `FIREBASE_WEB_API_KEY_PROD` | Web API key for REST auth sign-in (prod) |
+
+## Python utility CLI (`tools/`)
+
+A `uv`-managed Python CLI for manual verification and smoke testing.
+
+```bash
+cd tools
+uv sync
+uv run mb --help                          # see all commands
+uv run mb auth create-account --email ... --password ... --name ...
+uv run mb children create --email ... --password ... --name "Sam"
+uv run mb smoke-test                      # full end-to-end cycle
+uv run mb --project prod smoke-test       # against prod
+```
+
+Requires `FIREBASE_WEB_API_KEY_DEV` (or `_PROD`) and
+`GOOGLE_APPLICATION_CREDENTIALS` env vars set.
+
 ## What lives where
 
 - `firebase.json`, `.firebaserc` — project config + emulator ports.
@@ -104,8 +140,37 @@ emulator. They live alongside Functions tests under `functions/test/`.
 - `functions/src/backfill/` — Postgres → Firestore migration (issue #12, Phase 2).
   `transform.ts` holds the pure logic, `runBackfill.ts` the orchestration,
   `cli.ts` the `npm run backfill` entry point. See `docs/migration-runbook.md`.
+- `tools/` — Python CLI (`mb`) for manual verification and smoke testing.
+  Managed with `uv`. See `tools/pyproject.toml`.
+- `.github/workflows/` — CI/CD pipelines (CI, deploy-dev, deploy-prod).
 - `docs/firebase-migration-plan.md` — phased migration plan.
 - `docs/schema.md` — collection layout source of truth.
+
+## No Compound Commands
+
+**Never chain commands with `&&`, `;`, or `|` in a single Bash tool
+call.** Each Bash tool call must contain exactly ONE command — no
+exceptions. If a sequence of commands is needed, make separate Bash
+tool calls for each.
+
+**Specifically banned patterns:**
+- `cd dir && command` or `cd dir; command` — use `git -C <path>` for
+  git, or pass the working directory as a flag/argument
+  (e.g. `npm --prefix functions run lint`, `./gradlew -p <path>`)
+- `command1 && command2` — make two separate Bash tool calls
+- `command1; command2` — same: two separate calls
+- `command | grep something` — use the Grep tool instead
+- `uv run python -c "..."` or `python - <<'EOF'` — write a script in
+  `scripts/` first and invoke it
+- Inline heredocs (`<<EOF`) chained into a command
+
+**The workaround for `cd` is always a flag or `-C`:** `git -C <path>`,
+`npm --prefix <path>`, `firebase --project <alias>`, etc. If a tool
+doesn't support a directory flag, write a wrapper script in
+`scripts/`.
+
+This eliminates the approval-click burden, keeps each action
+individually reviewable, and builds a reusable toolkit.
 
 ## Things to NOT do
 
