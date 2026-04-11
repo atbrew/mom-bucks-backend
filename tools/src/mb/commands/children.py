@@ -73,6 +73,43 @@ def create_child(ctx: click.Context, name: str, dob: datetime) -> None:
     )
 
 
+@children_group.command("update")
+@click.option("--child-id", required=True, help="Child document ID.")
+@click.option("--name", default=None, help="New display name.")
+@click.option(
+    "--dob",
+    "dob",
+    default=None,
+    type=click.DateTime(["%Y-%m-%d"]),
+    help="New date of birth (YYYY-MM-DD). Must stay a valid date.",
+)
+@click.pass_context
+def update_child(
+    ctx: click.Context,
+    child_id: str,
+    name: str | None,
+    dob: datetime | None,
+) -> None:
+    """Update mutable fields on a child (name, dateOfBirth)."""
+    if name is None and dob is None:
+        raise click.UsageError("Pass at least one of --name, --dob.")
+    client = _get_client(ctx)
+    fields: dict = {}
+    if name is not None:
+        fields["name"] = name
+    if dob is not None:
+        fields["dateOfBirth"] = dob.replace(tzinfo=timezone.utc)
+    client.update_doc(f"children/{child_id}", fields)
+    parts = []
+    if name is not None:
+        parts.append(f"name={name}")
+    if dob is not None:
+        parts.append(f"dob={dob.date().isoformat()}")
+    console.print(
+        f"[green]Updated child {child_id}:[/green] " + ", ".join(parts)
+    )
+
+
 @children_group.command("list")
 @click.pass_context
 def list_children(ctx: click.Context) -> None:
@@ -85,14 +122,25 @@ def list_children(ctx: click.Context) -> None:
         console.print("[dim]No children found.[/dim]")
         return
     table = Table(title="Children")
-    table.add_column("ID")
+    table.add_column("ID", overflow="fold")
     table.add_column("Name")
-    table.add_column("Balance")
+    table.add_column("DOB")
+    table.add_column("Photo", overflow="fold")
+    table.add_column("Parents", overflow="fold")
+    table.add_column("Balance", justify="right")
     for child in children:
         balance_cents = child.get("balance", 0)
+        dob_raw = child.get("dateOfBirth")
+        dob_display = dob_raw[:10] if isinstance(dob_raw, str) else "—"
+        photo = child.get("photoUrl") or "—"
+        parents = child.get("parentUids") or []
+        parents_display = ", ".join(parents) if parents else "—"
         table.add_row(
             child.get("_id", "?"),
             child.get("name", "?"),
+            dob_display,
+            photo,
+            parents_display,
             f"\u20ac{balance_cents / 100:.2f}",
         )
     console.print(table)
