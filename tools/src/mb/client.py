@@ -1,0 +1,327 @@
+"""
+Firebase REST client — client-auth path.
+
+All reads, writes, and callable invocations go through the Firebase
+REST APIs with an ID token obtained via email/password sign-in. This
+exercises the same auth + security rules path that the Android app
+uses, so a passing smoke test proves the full stack is working.
+
+Admin SDK is deliberately NOT used here. See admin.py for the narrow
+Admin SDK surface (user creation + cleanup only).
+"""
+
+from __future__ import annotations
+
+import os
+import time
+from dataclasses import dataclass
+from datetime import datetime, timezone
+from typing import Any
+
+import requests
+
+
+# ─── Project configuration ─────────────────────────────────────────
+
+PROJECTS = {
+    "dev": {
+        "project_id": "mom-bucks-dev-b3772",
+        "api_key_env": "FIREBASE_WEB_API_KEY_DEV",
+        "region": "us-central1",
+    },
+    "prod": {
+        "project_id": "mom-bucks-prod-81096",
+        "api_key_env": "FIREBASE_WEB_API_KEY_PROD",
+        "region": "us-central1",
+    },
+}
+
+
+@dataclass
+class ProjectConfig:
+    project_id: str
+    api_key: str
+    api_key_env: str
+    region: str
+
+    def require_api_key(self) -> str:
+        """Return the API key, raising if not set."""
+        if not self.api_key:
+            raise RuntimeError(
+                f"Environment variable {self.api_key_env} is not set. "
+                f"Set it to the Firebase Web API key."
+            )
+        return self.api_key
+
+    @property
+    def firestore_url(self) -> str:
+        return (
+            f"https://firestore.googleapis.com/v1/projects/"
+            f"{self.project_id}/databases/(default)/documents"
+        )
+
+    @property
+    def functions_url(self) -> str:
+        return (
+            f"https://{self.region}-{self.project_id}.cloudfunctions.net"
+        )
+
+
+def get_project_config(alias: str) -> ProjectConfig:
+    info = PROJECTS[alias]
+    api_key = os.environ.get(info["api_key_env"], "")
+    return ProjectConfig(
+        project_id=info["project_id"],
+        api_key=api_key,
+        api_key_env=info["api_key_env"],
+        region=info["region"],
+    )
+
+
+# ─── Auth ───────────────────────────────────────────────────────────
+
+class AuthError(RuntimeError):
+    """Raised when Firebase Auth returns an error."""
+
+
+def sign_in(api_key: str | ProjectConfig, email: str, password: str) -> dict:
+    """Sign in via Firebase Auth REST API, return the full response.
+
+    api_key can be a string or a ProjectConfig (calls require_api_key()).
+    """
+    if isinstance(api_key, ProjectConfig):
+        api_key = api_key.require_api_key()
+    url = (
+        "https://identitytoolkit.googleapis.com/v1/"
+        f"accounts:signInWithPassword?key={api_key}"
+    )
+    resp = requests.post(url, json={
+        "email": email,
+        "password": password,
+        "returnSecureToken": True,
+    })
+    if resp.status_code >= 400:
+        try:
+            code = resp.json().get("error", {}).get("message", "")
+        except Exception:
+            code = ""
+        if code in ("INVALID_LOGIN_CREDENTIALS", "INVALID_PASSWORD",
+                    "EMAIL_NOT_FOUND"):
+            raise AuthError(f"Invalid email or password for {email}.")
+        if code == "USER_DISABLED":
+            raise AuthError(f"Account {email} is disabled.")
+        if code.startswith("TOO_MANY_ATTEMPTS"):
+            raise AuthError("Too many failed attempts. Try again later.")
+        raise AuthError(f"Sign-in failed: {code or resp.text}")
+    return resp.json()
+
+
+# ─── Firestore value encoding ──────────────────────────────────────
+
+def to_firestore_value(val: Any) -> dict:
+    """Convert a Python value to a Firestore REST value object."""
+    if val is None:
+        return {"nullValue": None}
+    if isinstance(val, bool):
+        return {"booleanValue": val}
+    if isinstance(val, int):
+        return {"integerValue": str(val)}
+    if isinstance(val, float):
+        return {"doubleValue": val}
+    if isinstance(val, str):
+        return {"stringValue": val}
+    if isinstance(val, datetime):
+        return {"timestampValue": val.isoformat()}
+    if isinstance(val, list):
+        return {
+            "arrayValue": {
+                "values": [to_firestore_value(v) for v in val],
+            }
+        }
+    if isinstance(val, dict):
+        return {
+            "mapValue": {
+                "fields": {
+                    k: to_firestore_value(v) for k, v in val.items()
+                },
+            }
+        }
+    raise TypeError(f"Cannot convert {type(val)} to Firestore value")
+
+
+def from_firestore_value(val: dict) -> Any:
+    """Convert a Firestore REST value object to a Python value."""
+    if "nullValue" in val:
+        return None
+    if "booleanValue" in val:
+        return val["booleanValue"]
+    if "integerValue" in val:
+        return int(val["integerValue"])
+    if "doubleValue" in val:
+        return val["doubleValue"]
+    if "stringValue" in val:
+        return val["stringValue"]
+    if "timestampValue" in val:
+        return val["timestampValue"]
+    if "arrayValue" in val:
+        values = val["arrayValue"].get("values", [])
+        return [from_firestore_value(v) for v in values]
+    if "mapValue" in val:
+        fields = val["mapValue"].get("fields", {})
+        return {k: from_firestore_value(v) for k, v in fields.items()}
+    return None
+
+
+def from_firestore_doc(doc: dict) -> dict:
+    """Extract fields from a Firestore REST document response."""
+    fields = doc.get("fields", {})
+    return {k: from_firestore_value(v) for k, v in fields.items()}
+
+
+# ─── Firestore client ──────────────────────────────────────────────
+
+class FirestoreClient:
+    """Firestore REST client authenticated with an ID token."""
+
+    def __init__(self, config: ProjectConfig, id_token: str, uid: str):
+        self.config = config
+        self.id_token = id_token
+        self.uid = uid
+
+    @property
+    def _headers(self) -> dict:
+        return {"Authorization": f"Bearer {self.id_token}"}
+
+    def get_doc(self, path: str) -> dict | None:
+        """Read a document. Returns decoded fields or None if not found."""
+        url = f"{self.config.firestore_url}/{path}"
+        resp = requests.get(url, headers=self._headers)
+        if resp.status_code == 404:
+            return None
+        resp.raise_for_status()
+        return from_firestore_doc(resp.json())
+
+    def create_doc(
+        self,
+        collection: str,
+        fields: dict[str, Any],
+        doc_id: str | None = None,
+    ) -> str:
+        """Create a document. Returns the document ID."""
+        url = f"{self.config.firestore_url}/{collection}"
+        body = {
+            "fields": {k: to_firestore_value(v) for k, v in fields.items()}
+        }
+        params = {}
+        if doc_id:
+            params["documentId"] = doc_id
+        resp = requests.post(
+            url, headers=self._headers, json=body, params=params,
+        )
+        resp.raise_for_status()
+        # Document name is like "projects/.../documents/children/abc123"
+        name = resp.json()["name"]
+        return name.split("/")[-1]
+
+    def update_doc(self, path: str, fields: dict[str, Any]) -> None:
+        """Update specific fields on a document."""
+        url = f"{self.config.firestore_url}/{path}"
+        body = {
+            "fields": {k: to_firestore_value(v) for k, v in fields.items()}
+        }
+        params = [("updateMask.fieldPaths", k) for k in fields]
+        resp = requests.patch(
+            url, headers=self._headers, json=body, params=params,
+        )
+        resp.raise_for_status()
+
+    def delete_doc(self, path: str) -> None:
+        """Delete a document."""
+        url = f"{self.config.firestore_url}/{path}"
+        resp = requests.delete(url, headers=self._headers)
+        if resp.status_code == 404:
+            return
+        resp.raise_for_status()
+
+    def query(
+        self,
+        collection: str,
+        field: str,
+        op: str,
+        value: Any,
+    ) -> list[dict]:
+        """Run a structured query. Returns a list of decoded documents."""
+        url = f"{self.config.firestore_url}:runQuery"
+        body = {
+            "structuredQuery": {
+                "from": [{"collectionId": collection}],
+                "where": {
+                    "fieldFilter": {
+                        "field": {"fieldPath": field},
+                        "op": op,
+                        "value": to_firestore_value(value),
+                    }
+                },
+            }
+        }
+        resp = requests.post(url, headers=self._headers, json=body)
+        resp.raise_for_status()
+        results = []
+        for item in resp.json():
+            doc = item.get("document")
+            if doc:
+                doc_id = doc["name"].split("/")[-1]
+                fields = from_firestore_doc(doc)
+                fields["_id"] = doc_id
+                results.append(fields)
+        return results
+
+    def call_function(self, name: str, data: dict) -> dict:
+        """Invoke a callable Cloud Function."""
+        url = f"{self.config.functions_url}/{name}"
+        resp = requests.post(
+            url,
+            headers={
+                **self._headers,
+                "Content-Type": "application/json",
+            },
+            json={"data": data},
+        )
+        resp.raise_for_status()
+        return resp.json().get("result", {})
+
+    def call_http_function(self, name: str) -> dict:
+        """Invoke an HTTP Cloud Function (GET)."""
+        url = f"{self.config.functions_url}/{name}"
+        resp = requests.get(url, headers=self._headers)
+        resp.raise_for_status()
+        return resp.json()
+
+    def poll_doc_field(
+        self,
+        path: str,
+        field: str,
+        expected: Any,
+        timeout_s: float = 10,
+        interval_s: float = 2,
+    ) -> dict:
+        """Poll a document until a field matches the expected value."""
+        deadline = time.time() + timeout_s
+        last_value = None
+        while time.time() < deadline:
+            doc = self.get_doc(path)
+            if doc and doc.get(field) == expected:
+                return doc
+            last_value = doc.get(field) if doc else None
+            time.sleep(interval_s)
+        raise TimeoutError(
+            f"Timed out waiting for {path}.{field} == {expected!r} "
+            f"(last value: {last_value!r})"
+        )
+
+
+def make_timestamp(dt: datetime | None = None) -> str:
+    """Create an ISO 8601 timestamp string for Firestore REST."""
+    if dt is None:
+        dt = datetime.now(timezone.utc)
+    return dt.isoformat()
