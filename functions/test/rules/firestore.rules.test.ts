@@ -35,7 +35,14 @@ import {
   initializeTestEnvironment,
   RulesTestEnvironment,
 } from "@firebase/rules-unit-testing";
-import { doc, getDoc, setDoc, updateDoc, deleteDoc } from "firebase/firestore";
+import {
+  doc,
+  getDoc,
+  setDoc,
+  updateDoc,
+  deleteDoc,
+  serverTimestamp,
+} from "firebase/firestore";
 
 // Resolve the rules file from the repo root. Test file lives at
 // functions/test/rules/firestore.rules.test.ts; firestore.rules is at
@@ -72,6 +79,21 @@ beforeEach(async () => {
 // we can set up arbitrary initial state (including parentUids arrays
 // that legitimate clients could never write directly).
 
+// Default DOB for seeded children. Real children always have one
+// (enforced at create-time by rules), so every realistic fixture
+// should carry one too — otherwise the update-time DOB guards below
+// can't be exercised. Tests that need a specific DOB override via
+// the `extra` argument.
+const DEFAULT_SEED_DOB = new Date("2018-05-01T00:00:00Z");
+
+// Default createdAt for seeded children. Mirrors DEFAULT_SEED_DOB:
+// real children always carry a `createdAt` (enforced at create-time
+// by rules, which pin it to `request.time`), so seeding must supply
+// one too — otherwise the update-time `createdAtUnchanged()` guards
+// below have nothing to compare against and the rule becomes
+// inadvertently lax.
+const DEFAULT_SEED_CREATED_AT = new Date("2025-01-01T09:30:00Z");
+
 async function seedChild(
   childId: string,
   parentUids: string[],
@@ -81,6 +103,8 @@ async function seedChild(
     const db = ctx.firestore();
     await setDoc(doc(db, "children", childId), {
       name: childId,
+      dateOfBirth: DEFAULT_SEED_DOB,
+      createdAt: DEFAULT_SEED_CREATED_AT,
       balance: 0,
       vaultBalance: 0,
       parentUids,
@@ -167,11 +191,19 @@ describe("children/{childId}", () => {
   });
 
   describe("create", () => {
+    // Fixed DOB used by the happy-path create tests. A calendar date
+    // (no time-of-day) mirroring the Flask `Child.date_of_birth` column
+    // semantics — Firestore stores it as a `timestamp` but callers
+    // should treat it as a day.
+    const SAM_DOB = new Date("2018-05-01T00:00:00Z");
+
     it("allows creating a child with the caller's own uid in parentUids", async () => {
       const alice = env.authenticatedContext("alice").firestore();
       await assertSucceeds(
         setDoc(doc(alice, "children/sam"), {
           name: "Sam",
+          dateOfBirth: SAM_DOB,
+          createdAt: serverTimestamp(),
           balance: 0,
           vaultBalance: 0,
           parentUids: ["alice"],
@@ -186,6 +218,8 @@ describe("children/{childId}", () => {
       await assertFails(
         setDoc(doc(alice, "children/sam"), {
           name: "Sam",
+          dateOfBirth: SAM_DOB,
+          createdAt: serverTimestamp(),
           balance: 0,
           vaultBalance: 0,
           parentUids: ["bob"],
@@ -200,6 +234,8 @@ describe("children/{childId}", () => {
       await assertFails(
         setDoc(doc(alice, "children/sam"), {
           name: "Sam",
+          dateOfBirth: SAM_DOB,
+          createdAt: serverTimestamp(),
           balance: 0,
           vaultBalance: 0,
           parentUids: [],
@@ -217,6 +253,8 @@ describe("children/{childId}", () => {
       await assertFails(
         setDoc(doc(alice, "children/sam"), {
           name: "Sam",
+          dateOfBirth: SAM_DOB,
+          createdAt: serverTimestamp(),
           balance: 0,
           vaultBalance: 0,
           parentUids: ["alice", "bob"],
@@ -231,6 +269,8 @@ describe("children/{childId}", () => {
       await assertFails(
         setDoc(doc(anon, "children/sam"), {
           name: "Sam",
+          dateOfBirth: SAM_DOB,
+          createdAt: serverTimestamp(),
           balance: 0,
           vaultBalance: 0,
           parentUids: ["alice"],
@@ -238,6 +278,195 @@ describe("children/{childId}", () => {
           version: 1,
         }),
       );
+    });
+
+    // ─── dateOfBirth required field ──────────────────────────────
+    //
+    // Mirrors the Flask `Child.date_of_birth` column
+    // (`db.Date, nullable=False`). A child cannot be created without
+    // it. These tests pin the shape check at the rules layer so the
+    // Phase 2 backfill and any future client writers cannot silently
+    // drop the field.
+    describe("dateOfBirth required field", () => {
+      it("denies creating a child with no dateOfBirth field at all", async () => {
+        const alice = env.authenticatedContext("alice").firestore();
+        await assertFails(
+          setDoc(doc(alice, "children/sam"), {
+            name: "Sam",
+            createdAt: serverTimestamp(),
+            balance: 0,
+            vaultBalance: 0,
+            parentUids: ["alice"],
+            createdByUid: "alice",
+            version: 1,
+          }),
+        );
+      });
+
+      it("denies creating a child whose dateOfBirth is not a timestamp (e.g. a string)", async () => {
+        // A string like "2018-05-01" sneaking through would defeat the
+        // point of storing a real timestamp. Rules must reject it.
+        const alice = env.authenticatedContext("alice").firestore();
+        await assertFails(
+          setDoc(doc(alice, "children/sam"), {
+            name: "Sam",
+            dateOfBirth: "2018-05-01",
+            createdAt: serverTimestamp(),
+            balance: 0,
+            vaultBalance: 0,
+            parentUids: ["alice"],
+            createdByUid: "alice",
+            version: 1,
+          }),
+        );
+      });
+
+      it("allows creating a child with a valid dateOfBirth timestamp", async () => {
+        const alice = env.authenticatedContext("alice").firestore();
+        await assertSucceeds(
+          setDoc(doc(alice, "children/sam"), {
+            name: "Sam",
+            dateOfBirth: SAM_DOB,
+            createdAt: serverTimestamp(),
+            balance: 0,
+            vaultBalance: 0,
+            parentUids: ["alice"],
+            createdByUid: "alice",
+            version: 1,
+          }),
+        );
+      });
+    });
+
+    // ─── createdAt required + bound to request.time ───────────────
+    //
+    // Reversing PR #32's pushback on Gemini's `createdAt` comments.
+    // A required, server-timestamped, immutable createdAt is the
+    // strongest data model at this stage. Rules must:
+    //
+    //   1. Reject creates with no `createdAt` at all.
+    //   2. Reject creates whose `createdAt` is a string or other
+    //      non-timestamp.
+    //   3. Reject creates whose `createdAt` is a client-chosen
+    //      timestamp (e.g. `new Date()` from a drifting clock or a
+    //      deliberately-backdated "imported" record). The only way
+    //      to pass the create rule is to write `request.time` via
+    //      `serverTimestamp()`, which the emulator binds to
+    //      `request.time` during rule evaluation.
+    //
+    // Immutability on update is covered in the "createdAt immutability
+    // on update" describe block below.
+    describe("createdAt required and bound to request.time on create", () => {
+      it("denies creating a child with no createdAt field at all", async () => {
+        const alice = env.authenticatedContext("alice").firestore();
+        await assertFails(
+          setDoc(doc(alice, "children/sam"), {
+            name: "Sam",
+            dateOfBirth: SAM_DOB,
+            balance: 0,
+            vaultBalance: 0,
+            parentUids: ["alice"],
+            createdByUid: "alice",
+            version: 1,
+          }),
+        );
+      });
+
+      it("denies creating a child whose createdAt is not a timestamp (e.g. a string)", async () => {
+        const alice = env.authenticatedContext("alice").firestore();
+        await assertFails(
+          setDoc(doc(alice, "children/sam"), {
+            name: "Sam",
+            dateOfBirth: SAM_DOB,
+            createdAt: "2025-01-01T09:30:00Z",
+            balance: 0,
+            vaultBalance: 0,
+            parentUids: ["alice"],
+            createdByUid: "alice",
+            version: 1,
+          }),
+        );
+      });
+
+      it("denies creating a child whose createdAt is a client-chosen Date (not serverTimestamp)", async () => {
+        // A client-chosen `new Date()` will not equal `request.time`
+        // during rule evaluation (different instant, different drift).
+        // This test pins the "server time only" invariant: the only
+        // way to pass is via `serverTimestamp()`.
+        const alice = env.authenticatedContext("alice").firestore();
+        await assertFails(
+          setDoc(doc(alice, "children/sam"), {
+            name: "Sam",
+            dateOfBirth: SAM_DOB,
+            createdAt: new Date("2020-01-01T00:00:00Z"),
+            balance: 0,
+            vaultBalance: 0,
+            parentUids: ["alice"],
+            createdByUid: "alice",
+            version: 1,
+          }),
+        );
+      });
+
+      it("allows creating a child with createdAt = serverTimestamp() (which rules see as request.time)", async () => {
+        const alice = env.authenticatedContext("alice").firestore();
+        await assertSucceeds(
+          setDoc(doc(alice, "children/sam"), {
+            name: "Sam",
+            dateOfBirth: SAM_DOB,
+            createdAt: serverTimestamp(),
+            balance: 0,
+            vaultBalance: 0,
+            parentUids: ["alice"],
+            createdByUid: "alice",
+            version: 1,
+          }),
+        );
+      });
+    });
+
+    // ─── createdByUid must equal request.auth.uid on create ───────
+    //
+    // Audit integrity: the "who created this child" stamp must be
+    // the actual creator, not an arbitrary string. Without this
+    // guard, a signed-in parent could forge `createdByUid: 'someone_else'`
+    // at create time and falsify the audit trail. PR #32 review
+    // feedback from gemini-code-assist (comment 3068107046).
+    //
+    // NB: the parentUids sole-member + self guard is already enforced
+    // by lines 150-152 of firestore.rules — the other half of the
+    // same review comment was already addressed in a87e5bc.
+    describe("createdByUid identity guard on create", () => {
+      it("denies creating a child whose createdByUid is someone else's uid", async () => {
+        const alice = env.authenticatedContext("alice").firestore();
+        await assertFails(
+          setDoc(doc(alice, "children/sam"), {
+            name: "Sam",
+            dateOfBirth: SAM_DOB,
+            createdAt: serverTimestamp(),
+            balance: 0,
+            vaultBalance: 0,
+            parentUids: ["alice"],
+            createdByUid: "mallory",
+            version: 1,
+          }),
+        );
+      });
+
+      it("denies creating a child with no createdByUid field at all", async () => {
+        const alice = env.authenticatedContext("alice").firestore();
+        await assertFails(
+          setDoc(doc(alice, "children/sam"), {
+            name: "Sam",
+            dateOfBirth: SAM_DOB,
+            createdAt: serverTimestamp(),
+            balance: 0,
+            vaultBalance: 0,
+            parentUids: ["alice"],
+            version: 1,
+          }),
+        );
+      });
     });
   });
 
@@ -274,6 +503,165 @@ describe("children/{childId}", () => {
       await assertFails(
         updateDoc(doc(alice, "children/sam"), { parentUids: ["alice"] }),
       );
+    });
+
+    // ─── dateOfBirth is immutable after create ───────────────────
+    //
+    // The reviewers on PR #32 flagged that enforcing `dateOfBirth`
+    // only on create is a hollow guarantee: a signed-in parent could
+    // then update the child doc, strip the field, or change it to a
+    // different value, and the "required" invariant would silently
+    // rot. Biologically DOB doesn't change, so the simplest fix is
+    // to pin it as immutable at the rules layer. These tests lock in
+    // that behaviour.
+    describe("dateOfBirth immutability on update", () => {
+      it("denies an update that sets dateOfBirth to a different timestamp", async () => {
+        await seedChild("sam", ["alice"]);
+        const alice = env.authenticatedContext("alice").firestore();
+        await assertFails(
+          updateDoc(doc(alice, "children/sam"), {
+            dateOfBirth: new Date("2019-06-01T00:00:00Z"),
+          }),
+        );
+      });
+
+      it("denies an update that removes dateOfBirth (FieldValue.delete equivalent)", async () => {
+        // The Firestore web SDK uses `deleteField()` from
+        // firebase/firestore, but re-exporting it would widen the
+        // test's import surface. A `null` write is functionally the
+        // same shape-check failure path — not a timestamp — so this
+        // covers the "delete" case at the rules layer even without
+        // pulling in the deleteField sentinel.
+        await seedChild("sam", ["alice"]);
+        const alice = env.authenticatedContext("alice").firestore();
+        await assertFails(
+          updateDoc(doc(alice, "children/sam"), {
+            dateOfBirth: null,
+          }),
+        );
+      });
+
+      it("denies an update that sets dateOfBirth to a non-timestamp (e.g. a string)", async () => {
+        await seedChild("sam", ["alice"]);
+        const alice = env.authenticatedContext("alice").firestore();
+        await assertFails(
+          updateDoc(doc(alice, "children/sam"), {
+            dateOfBirth: "2019-06-01",
+          }),
+        );
+      });
+
+      it("allows a name update that does not touch dateOfBirth", async () => {
+        // Regression guard: the update rule must not become so strict
+        // that ordinary field updates (rename, balance bumps, etc.)
+        // get denied just because DOB is in the doc.
+        await seedChild("sam", ["alice"]);
+        const alice = env.authenticatedContext("alice").firestore();
+        await assertSucceeds(
+          updateDoc(doc(alice, "children/sam"), { name: "Samuel" }),
+        );
+      });
+    });
+
+    // ─── createdAt is immutable after create ─────────────────────
+    //
+    // Mirrors the dateOfBirth immutability block above. A child's
+    // creation instant is historical — it cannot legitimately change
+    // post-create, so any update that touches `createdAt` (to
+    // overwrite, null out, or retype it) must be refused.
+    describe("createdAt immutability on update", () => {
+      it("denies an update that sets createdAt to a different timestamp", async () => {
+        await seedChild("sam", ["alice"]);
+        const alice = env.authenticatedContext("alice").firestore();
+        await assertFails(
+          updateDoc(doc(alice, "children/sam"), {
+            createdAt: new Date("2025-02-02T10:00:00Z"),
+          }),
+        );
+      });
+
+      it("denies an update that sets createdAt to serverTimestamp() (re-stamping)", async () => {
+        // Even serverTimestamp() — which is the only legitimate way to
+        // write `createdAt` on CREATE — must be refused on UPDATE.
+        // Otherwise a parent could silently bump an old child's
+        // "createdAt" to today and corrupt the historical ordering.
+        await seedChild("sam", ["alice"]);
+        const alice = env.authenticatedContext("alice").firestore();
+        await assertFails(
+          updateDoc(doc(alice, "children/sam"), {
+            createdAt: serverTimestamp(),
+          }),
+        );
+      });
+
+      it("denies an update that removes createdAt (null write)", async () => {
+        await seedChild("sam", ["alice"]);
+        const alice = env.authenticatedContext("alice").firestore();
+        await assertFails(
+          updateDoc(doc(alice, "children/sam"), {
+            createdAt: null,
+          }),
+        );
+      });
+
+      it("denies an update that sets createdAt to a non-timestamp (e.g. a string)", async () => {
+        await seedChild("sam", ["alice"]);
+        const alice = env.authenticatedContext("alice").firestore();
+        await assertFails(
+          updateDoc(doc(alice, "children/sam"), {
+            createdAt: "2025-02-02T10:00:00Z",
+          }),
+        );
+      });
+
+      it("allows a name update that does not touch createdAt", async () => {
+        // Regression guard: ordinary field updates must still go
+        // through even though createdAt is now pinned.
+        await seedChild("sam", ["alice"]);
+        const alice = env.authenticatedContext("alice").firestore();
+        await assertSucceeds(
+          updateDoc(doc(alice, "children/sam"), { name: "Samuel" }),
+        );
+      });
+    });
+
+    // ─── createdByUid is immutable after create ──────────────────
+    //
+    // Mirrors `dateOfBirthUnchanged()` / `createdAtUnchanged()`.
+    // `createdByUid` is an audit-only field — the identity of the
+    // original creator must never be overwritten. Without this
+    // guard a parent could silently rewrite history and pin a child
+    // on another parent as "creator". PR #32 review feedback from
+    // gemini-code-assist (comment 3068107048).
+    describe("createdByUid immutability on update", () => {
+      it("denies an update that overwrites createdByUid with a different uid", async () => {
+        await seedChild("sam", ["alice"]);
+        const alice = env.authenticatedContext("alice").firestore();
+        await assertFails(
+          updateDoc(doc(alice, "children/sam"), {
+            createdByUid: "mallory",
+          }),
+        );
+      });
+
+      it("denies an update that nulls out createdByUid", async () => {
+        await seedChild("sam", ["alice"]);
+        const alice = env.authenticatedContext("alice").firestore();
+        await assertFails(
+          updateDoc(doc(alice, "children/sam"), {
+            createdByUid: null,
+          }),
+        );
+      });
+
+      it("allows a name update that does not touch createdByUid", async () => {
+        // Regression guard: ordinary field updates still go through.
+        await seedChild("sam", ["alice"]);
+        const alice = env.authenticatedContext("alice").firestore();
+        await assertSucceeds(
+          updateDoc(doc(alice, "children/sam"), { name: "Samuel" }),
+        );
+      });
     });
   });
 
@@ -318,6 +706,7 @@ describe("children/{childId}/transactions/{txnId}", () => {
         type: "LODGE",
         description: "chore",
         createdByUid: "alice",
+        createdAt: serverTimestamp(),
       }),
     );
   });
@@ -362,6 +751,7 @@ describe("children/{childId}/transactions/{txnId}", () => {
           type: "WITHDRAW",
           description: "treat",
           createdByUid: "alice",
+          createdAt: serverTimestamp(),
         }),
       );
     });
@@ -375,6 +765,7 @@ describe("children/{childId}/transactions/{txnId}", () => {
           type: "WITHDRAW",
           description: "payout",
           createdByUid: "alice",
+          createdAt: serverTimestamp(),
         }),
       );
     });
@@ -388,6 +779,7 @@ describe("children/{childId}/transactions/{txnId}", () => {
           type: "WITHDRAW",
           description: "overspend by one cent",
           createdByUid: "alice",
+          createdAt: serverTimestamp(),
         }),
       );
     });
@@ -401,6 +793,7 @@ describe("children/{childId}/transactions/{txnId}", () => {
           type: "WITHDRAW",
           description: "cold wallet",
           createdByUid: "alice",
+          createdAt: serverTimestamp(),
         }),
       );
     });
@@ -416,6 +809,7 @@ describe("children/{childId}/transactions/{txnId}", () => {
           type: "LODGE",
           description: "seed",
           createdByUid: "alice",
+          createdAt: serverTimestamp(),
         }),
       );
     });
@@ -437,6 +831,7 @@ describe("children/{childId}/transactions/{txnId}", () => {
           type: "WITHDRAW",
           description: "negative withdraw",
           createdByUid: "alice",
+          createdAt: serverTimestamp(),
         }),
       );
     });
@@ -450,6 +845,211 @@ describe("children/{childId}/transactions/{txnId}", () => {
           type: "LODGE",
           description: "negative lodge",
           createdByUid: "alice",
+          createdAt: serverTimestamp(),
+        }),
+      );
+    });
+  });
+
+  // ─── createdAt required + bound to request.time on create ────────
+  //
+  // Ledger rows must be server-stamped. Without this guard a client
+  // could backdate (or forward-date) a transaction, which would
+  // corrupt audit trails and defeat any future "transactions in the
+  // last 7 days" query. Mirrors the children `createdAt` pattern
+  // from 327e98f — rules refuse any write that doesn't resolve to
+  // `request.time`.
+  describe("createdAt required and bound to request.time on create", () => {
+    it("denies creating a transaction with no createdAt field", async () => {
+      await seedChild("sam", ["alice"], { balance: 1000 });
+      const alice = env.authenticatedContext("alice").firestore();
+      await assertFails(
+        setDoc(doc(alice, "children/sam/transactions/t1"), {
+          amount: 500,
+          type: "LODGE",
+          description: "chore",
+          createdByUid: "alice",
+        }),
+      );
+    });
+
+    it("denies creating a transaction whose createdAt is a string", async () => {
+      await seedChild("sam", ["alice"], { balance: 1000 });
+      const alice = env.authenticatedContext("alice").firestore();
+      await assertFails(
+        setDoc(doc(alice, "children/sam/transactions/t1"), {
+          amount: 500,
+          type: "LODGE",
+          description: "chore",
+          createdByUid: "alice",
+          createdAt: "2025-06-01T14:22:00Z",
+        }),
+      );
+    });
+
+    it("denies creating a transaction whose createdAt is a client-chosen Date", async () => {
+      // Client clocks drift. Deliberate backdating is worse.
+      // The only legitimate way to write `createdAt` is via
+      // `serverTimestamp()`, which the rule sees as `request.time`.
+      await seedChild("sam", ["alice"], { balance: 1000 });
+      const alice = env.authenticatedContext("alice").firestore();
+      await assertFails(
+        setDoc(doc(alice, "children/sam/transactions/t1"), {
+          amount: 500,
+          type: "LODGE",
+          description: "chore",
+          createdByUid: "alice",
+          createdAt: new Date("2020-01-01T00:00:00Z"),
+        }),
+      );
+    });
+
+    it("allows creating a transaction with createdAt = serverTimestamp()", async () => {
+      await seedChild("sam", ["alice"], { balance: 1000 });
+      const alice = env.authenticatedContext("alice").firestore();
+      await assertSucceeds(
+        setDoc(doc(alice, "children/sam/transactions/t1"), {
+          amount: 500,
+          type: "LODGE",
+          description: "chore",
+          createdByUid: "alice",
+          createdAt: serverTimestamp(),
+        }),
+      );
+    });
+  });
+
+  // ─── createdAt immutability on update ────────────────────────────
+  //
+  // The existing rules allow `update` on transactions (parents can
+  // correct a typo in `description`, tag a txn, etc.). Without an
+  // immutability pin, that same UPDATE path would let a parent
+  // silently re-stamp the ledger entry's `createdAt`. Mirrors the
+  // children `createdAtUnchanged()` pattern.
+  describe("createdAt immutability on update", () => {
+    async function seedTransaction(
+      childId: string,
+      txnId: string,
+    ): Promise<void> {
+      await env.withSecurityRulesDisabled(async (ctx) => {
+        await setDoc(
+          doc(ctx.firestore(), `children/${childId}/transactions/${txnId}`),
+          {
+            amount: 500,
+            type: "LODGE",
+            description: "chore",
+            createdByUid: "alice",
+            createdAt: new Date("2025-06-01T14:22:00Z"),
+          },
+        );
+      });
+    }
+
+    it("denies an update that sets createdAt to a different timestamp", async () => {
+      await seedChild("sam", ["alice"]);
+      await seedTransaction("sam", "t1");
+      const alice = env.authenticatedContext("alice").firestore();
+      await assertFails(
+        updateDoc(doc(alice, "children/sam/transactions/t1"), {
+          createdAt: new Date("2026-01-01T00:00:00Z"),
+        }),
+      );
+    });
+
+    it("denies an update that re-stamps createdAt via serverTimestamp()", async () => {
+      await seedChild("sam", ["alice"]);
+      await seedTransaction("sam", "t1");
+      const alice = env.authenticatedContext("alice").firestore();
+      await assertFails(
+        updateDoc(doc(alice, "children/sam/transactions/t1"), {
+          createdAt: serverTimestamp(),
+        }),
+      );
+    });
+
+    it("allows a description update that does not touch createdAt", async () => {
+      // Regression guard: non-createdAt updates must continue to work.
+      await seedChild("sam", ["alice"]);
+      await seedTransaction("sam", "t1");
+      const alice = env.authenticatedContext("alice").firestore();
+      await assertSucceeds(
+        updateDoc(doc(alice, "children/sam/transactions/t1"), {
+          description: "chore (corrected)",
+        }),
+      );
+    });
+  });
+
+  // ─── ledger-core immutability on update ──────────────────────────
+  //
+  // `amount`, `type`, and `createdByUid` are the three fields that
+  // define what a transaction actually IS. The balance derivation in
+  // `onTransactionCreate` (#15) consumes them exactly once on create;
+  // a subsequent client-side mutation would silently desync
+  // `child.balance` from the ledger and corrupt the audit trail.
+  // PR #32 review feedback from gemini-code-assist (comment 3068107040).
+  describe("amount / type / createdByUid immutability on update", () => {
+    async function seedTransaction(
+      childId: string,
+      txnId: string,
+    ): Promise<void> {
+      await env.withSecurityRulesDisabled(async (ctx) => {
+        await setDoc(
+          doc(ctx.firestore(), `children/${childId}/transactions/${txnId}`),
+          {
+            amount: 500,
+            type: "LODGE",
+            description: "chore",
+            createdByUid: "alice",
+            createdAt: new Date("2025-06-01T14:22:00Z"),
+          },
+        );
+      });
+    }
+
+    it("denies an update that changes amount", async () => {
+      await seedChild("sam", ["alice"], { balance: 500 });
+      await seedTransaction("sam", "t1");
+      const alice = env.authenticatedContext("alice").firestore();
+      await assertFails(
+        updateDoc(doc(alice, "children/sam/transactions/t1"), {
+          amount: 9999,
+        }),
+      );
+    });
+
+    it("denies an update that flips type from LODGE to WITHDRAW", async () => {
+      // The most dangerous ledger mutation: flipping sign after the
+      // fact would double-count against child.balance and silently
+      // overspend the account.
+      await seedChild("sam", ["alice"], { balance: 500 });
+      await seedTransaction("sam", "t1");
+      const alice = env.authenticatedContext("alice").firestore();
+      await assertFails(
+        updateDoc(doc(alice, "children/sam/transactions/t1"), {
+          type: "WITHDRAW",
+        }),
+      );
+    });
+
+    it("denies an update that rewrites createdByUid", async () => {
+      await seedChild("sam", ["alice"], { balance: 500 });
+      await seedTransaction("sam", "t1");
+      const alice = env.authenticatedContext("alice").firestore();
+      await assertFails(
+        updateDoc(doc(alice, "children/sam/transactions/t1"), {
+          createdByUid: "mallory",
+        }),
+      );
+    });
+
+    it("allows a description-only update (regression guard)", async () => {
+      await seedChild("sam", ["alice"], { balance: 500 });
+      await seedTransaction("sam", "t1");
+      const alice = env.authenticatedContext("alice").firestore();
+      await assertSucceeds(
+        updateDoc(doc(alice, "children/sam/transactions/t1"), {
+          description: "chore (clarified)",
         }),
       );
     });
@@ -495,6 +1095,7 @@ describe("children/{childId}/vaultTransactions/{id}", () => {
       setDoc(doc(alice, "children/sam/vaultTransactions/v1"), {
         amount: 1000,
         type: "DEPOSIT",
+        createdAt: serverTimestamp(),
       }),
     );
   });
@@ -506,8 +1107,263 @@ describe("children/{childId}/vaultTransactions/{id}", () => {
       setDoc(doc(bob, "children/sam/vaultTransactions/v1"), {
         amount: 1000,
         type: "DEPOSIT",
+        createdAt: serverTimestamp(),
       }),
     );
+  });
+
+  // ─── createdAt required + bound to request.time on create ────────
+  //
+  // Same rationale as the main transactions collection. The vault
+  // ledger is equally load-bearing — it drives interest, unlocks,
+  // and vaultBalance — so a client cannot be allowed to pick or
+  // backdate the creation timestamp on vault transactions either.
+  describe("createdAt required and bound to request.time on create", () => {
+    it("denies creating a vault transaction with no createdAt field", async () => {
+      await seedChild("sam", ["alice"]);
+      const alice = env.authenticatedContext("alice").firestore();
+      await assertFails(
+        setDoc(doc(alice, "children/sam/vaultTransactions/v1"), {
+          amount: 1000,
+          type: "DEPOSIT",
+        }),
+      );
+    });
+
+    it("denies creating a vault transaction whose createdAt is a string", async () => {
+      await seedChild("sam", ["alice"]);
+      const alice = env.authenticatedContext("alice").firestore();
+      await assertFails(
+        setDoc(doc(alice, "children/sam/vaultTransactions/v1"), {
+          amount: 1000,
+          type: "DEPOSIT",
+          createdAt: "2025-07-15T09:00:00Z",
+        }),
+      );
+    });
+
+    it("denies creating a vault transaction whose createdAt is a client-chosen Date", async () => {
+      await seedChild("sam", ["alice"]);
+      const alice = env.authenticatedContext("alice").firestore();
+      await assertFails(
+        setDoc(doc(alice, "children/sam/vaultTransactions/v1"), {
+          amount: 1000,
+          type: "DEPOSIT",
+          createdAt: new Date("2020-01-01T00:00:00Z"),
+        }),
+      );
+    });
+
+    it("allows creating a vault transaction with createdAt = serverTimestamp()", async () => {
+      await seedChild("sam", ["alice"]);
+      const alice = env.authenticatedContext("alice").firestore();
+      await assertSucceeds(
+        setDoc(doc(alice, "children/sam/vaultTransactions/v1"), {
+          amount: 1000,
+          type: "DEPOSIT",
+          createdAt: serverTimestamp(),
+        }),
+      );
+    });
+  });
+
+  // ─── shape hardening on create ───────────────────────────────────
+  //
+  // Mirrors the transactions/{txnId} shape guards. Without these a
+  // client could seed `{amount: -100, type: 'GARBAGE'}` at the rules
+  // layer and land the doc, leaving the vault ledger with a row no
+  // downstream consumer (interest, unlocks, balance derivation) knows
+  // how to handle. PR #32 review feedback from gemini-code-assist
+  // (comment 3068107052).
+  describe("shape hardening on create", () => {
+    it("denies creating a vault transaction with a non-number amount", async () => {
+      await seedChild("sam", ["alice"]);
+      const alice = env.authenticatedContext("alice").firestore();
+      await assertFails(
+        setDoc(doc(alice, "children/sam/vaultTransactions/v1"), {
+          amount: "1000",
+          type: "DEPOSIT",
+          createdAt: serverTimestamp(),
+        }),
+      );
+    });
+
+    it("denies creating a vault transaction with a negative amount", async () => {
+      await seedChild("sam", ["alice"]);
+      const alice = env.authenticatedContext("alice").firestore();
+      await assertFails(
+        setDoc(doc(alice, "children/sam/vaultTransactions/v1"), {
+          amount: -1000,
+          type: "DEPOSIT",
+          createdAt: serverTimestamp(),
+        }),
+      );
+    });
+
+    it("denies creating a vault transaction with an unknown type", async () => {
+      // `FirestoreVaultTransaction.type` is a fixed enum. Any value
+      // outside the four allowed strings would break downstream
+      // switch statements in `onTransactionCreate` and similar.
+      await seedChild("sam", ["alice"]);
+      const alice = env.authenticatedContext("alice").firestore();
+      await assertFails(
+        setDoc(doc(alice, "children/sam/vaultTransactions/v1"), {
+          amount: 1000,
+          type: "WITHDRAW", // WITHDRAW belongs to the main ledger, not vault
+          createdAt: serverTimestamp(),
+        }),
+      );
+    });
+
+    it("allows each valid type value (DEPOSIT, UNLOCK, INTEREST_CLAIM, MATCH)", async () => {
+      // Exhaustiveness: every enum member must round-trip through the
+      // rule, otherwise a typo in the rule string would silently
+      // break a whole class of legitimate writes.
+      await seedChild("sam", ["alice"]);
+      const alice = env.authenticatedContext("alice").firestore();
+      for (const [idx, t] of [
+        "DEPOSIT",
+        "UNLOCK",
+        "INTEREST_CLAIM",
+        "MATCH",
+      ].entries()) {
+        await assertSucceeds(
+          setDoc(doc(alice, `children/sam/vaultTransactions/v${idx}`), {
+            amount: 500,
+            type: t,
+            createdAt: serverTimestamp(),
+          }),
+        );
+      }
+    });
+  });
+
+  // ─── createdAt immutability on update ────────────────────────────
+  //
+  // Vault transactions also allow updates (parents can correct a
+  // description, tag a unlock reason, etc.). Pin createdAt so a
+  // fresh write cannot silently bump it.
+  describe("createdAt immutability on update", () => {
+    async function seedVaultTransaction(
+      childId: string,
+      vaultTxnId: string,
+    ): Promise<void> {
+      await env.withSecurityRulesDisabled(async (ctx) => {
+        await setDoc(
+          doc(
+            ctx.firestore(),
+            `children/${childId}/vaultTransactions/${vaultTxnId}`,
+          ),
+          {
+            amount: 1000,
+            type: "DEPOSIT",
+            description: "initial deposit",
+            createdAt: new Date("2025-07-15T09:00:00Z"),
+          },
+        );
+      });
+    }
+
+    it("denies an update that sets createdAt to a different timestamp", async () => {
+      await seedChild("sam", ["alice"]);
+      await seedVaultTransaction("sam", "v1");
+      const alice = env.authenticatedContext("alice").firestore();
+      await assertFails(
+        updateDoc(doc(alice, "children/sam/vaultTransactions/v1"), {
+          createdAt: new Date("2026-01-01T00:00:00Z"),
+        }),
+      );
+    });
+
+    it("denies an update that re-stamps createdAt via serverTimestamp()", async () => {
+      await seedChild("sam", ["alice"]);
+      await seedVaultTransaction("sam", "v1");
+      const alice = env.authenticatedContext("alice").firestore();
+      await assertFails(
+        updateDoc(doc(alice, "children/sam/vaultTransactions/v1"), {
+          createdAt: serverTimestamp(),
+        }),
+      );
+    });
+
+    it("allows a description update that does not touch createdAt", async () => {
+      await seedChild("sam", ["alice"]);
+      await seedVaultTransaction("sam", "v1");
+      const alice = env.authenticatedContext("alice").firestore();
+      await assertSucceeds(
+        updateDoc(doc(alice, "children/sam/vaultTransactions/v1"), {
+          description: "initial deposit (corrected)",
+        }),
+      );
+    });
+  });
+
+  // ─── ledger-core immutability on update ──────────────────────────
+  //
+  // Same story as the main transactions collection: `amount` and
+  // `type` define the vault row's effect on `vaultBalance`, interest
+  // derivations, and unlock windows. A post-create mutation would
+  // silently decouple the stored row from every derived state.
+  // PR #32 review feedback from gemini-code-assist (comment 3068107043).
+  //
+  // Note: `FirestoreVaultTransaction` has no `createdByUid` field —
+  // unlike the main transactions collection — so only amount + type
+  // are pinned here.
+  describe("amount / type immutability on update", () => {
+    async function seedVaultTransaction(
+      childId: string,
+      vaultTxnId: string,
+    ): Promise<void> {
+      await env.withSecurityRulesDisabled(async (ctx) => {
+        await setDoc(
+          doc(
+            ctx.firestore(),
+            `children/${childId}/vaultTransactions/${vaultTxnId}`,
+          ),
+          {
+            amount: 1000,
+            type: "DEPOSIT",
+            description: "initial deposit",
+            createdAt: new Date("2025-07-15T09:00:00Z"),
+          },
+        );
+      });
+    }
+
+    it("denies an update that changes amount", async () => {
+      await seedChild("sam", ["alice"]);
+      await seedVaultTransaction("sam", "v1");
+      const alice = env.authenticatedContext("alice").firestore();
+      await assertFails(
+        updateDoc(doc(alice, "children/sam/vaultTransactions/v1"), {
+          amount: 9999,
+        }),
+      );
+    });
+
+    it("denies an update that flips type from DEPOSIT to UNLOCK", async () => {
+      // DEPOSIT → UNLOCK would re-sign the row against `vaultBalance`
+      // after the fact and corrupt the vault ledger.
+      await seedChild("sam", ["alice"]);
+      await seedVaultTransaction("sam", "v1");
+      const alice = env.authenticatedContext("alice").firestore();
+      await assertFails(
+        updateDoc(doc(alice, "children/sam/vaultTransactions/v1"), {
+          type: "UNLOCK",
+        }),
+      );
+    });
+
+    it("allows a description-only update (regression guard)", async () => {
+      await seedChild("sam", ["alice"]);
+      await seedVaultTransaction("sam", "v1");
+      const alice = env.authenticatedContext("alice").firestore();
+      await assertSucceeds(
+        updateDoc(doc(alice, "children/sam/vaultTransactions/v1"), {
+          description: "initial deposit (clarified)",
+        }),
+      );
+    });
   });
 });
 

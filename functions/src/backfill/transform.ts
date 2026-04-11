@@ -152,6 +152,34 @@ export interface FirestoreUser {
 
 export interface FirestoreChild {
   name: string;
+  /**
+   * Child's calendar date of birth. Mirrors the Flask
+   * `Child.date_of_birth` column (`db.Date, nullable=False`) — it is
+   * required on every child and never null. Stored as a Firestore
+   * `timestamp` (the Admin SDK converts the JS `Date` we hand it on
+   * write), but semantically it's a day: callers should ignore the
+   * time-of-day component.
+   */
+  dateOfBirth: Date;
+  /**
+   * Instant the child record was created. Required, immutable, and
+   * server-pinned.
+   *
+   *   - On the BACKFILL path, this is carried through verbatim from
+   *     `PgChild.created_at` so the historical creation order
+   *     survives the migration. The Admin SDK bypasses security
+   *     rules, so the backfill is free to write the historical
+   *     timestamp directly.
+   *   - On the CLIENT path (post-cutover), `firestore.rules`
+   *     enforces `createdAt == request.time` via a `serverTimestamp()`
+   *     write. Clients cannot forge or backdate the field.
+   *   - On UPDATE, `firestore.rules` pins it as immutable
+   *     (`createdAtUnchanged()`). A parent cannot re-stamp an old
+   *     child to today and corrupt the historical ordering.
+   *
+   * Mirrors Flask's `Child.created_at` column.
+   */
+  createdAt: Date;
   photoUrl: string | null;
   balance: number; // integer cents
   vaultBalance: number; // integer cents
@@ -214,12 +242,51 @@ export class BackfillError extends Error {
       | "ORPHAN_CHILD"
       | "ORPHAN_TRANSACTION"
       | "ORPHAN_VAULT_TXN"
-      | "INVALID_AMOUNT",
+      | "INVALID_AMOUNT"
+      | "INVALID_CHILD_DOB"
+      | "INVALID_CHILD_CREATED_AT"
+      | "INVALID_TRANSACTION_CREATED_AT"
+      | "INVALID_VAULT_TRANSACTION_CREATED_AT",
     public readonly context: Record<string, unknown> = {},
   ) {
     super(message);
     this.name = "BackfillError";
   }
+}
+
+/**
+ * Runtime guard for a Postgres `created_at` value. `readX()` helpers
+ * in `runBackfill.ts` cast raw rows to their `PgX` types without
+ * runtime validation, so if a misconfigured pg driver or a bad
+ * migration ever surfaced a string, null, or Invalid Date, the cast
+ * would hide it and the Admin SDK would write garbage into Firestore.
+ * Defend here in the pure transforms so the check is unit-testable
+ * without Postgres.
+ *
+ * Note: `new Date("not a date")` is still `instanceof Date`. The
+ * `Number.isNaN(getTime())` check is load-bearing.
+ *
+ * The child `transformChild` validator is intentionally NOT routed
+ * through this helper — it predates this extraction and its
+ * inline-with-comments form is exercised by locked-in tests from
+ * 327e98f; rewiring it would be drive-by churn. New call sites
+ * (transaction + vault transaction) share this helper.
+ */
+function validateCreatedAt(
+  value: unknown,
+  code:
+    | "INVALID_TRANSACTION_CREATED_AT"
+    | "INVALID_VAULT_TRANSACTION_CREATED_AT",
+  context: Record<string, unknown>,
+): Date {
+  if (!(value instanceof Date) || Number.isNaN(value.getTime())) {
+    throw new BackfillError(
+      `invalid created_at: ${String(value)}`,
+      code,
+      { ...context, value },
+    );
+  }
+  return value;
 }
 
 // ─── Helpers ────────────────────────────────────────────────────────
@@ -355,8 +422,54 @@ export function transformChild(
       { childId: row.id, postgresParentId: row.parent_id },
     );
   }
+
+  // Runtime validation of `date_of_birth`.
+  //
+  // The `pg` driver returns a Postgres `DATE` column as a JS `Date`
+  // at midnight UTC of that calendar day by default, which is what
+  // we want to hand to the Admin SDK — it will serialise to a
+  // Firestore `timestamp`. `readChildren()` casts `res.rows` to
+  // `PgChild[]` without runtime validation though, so if a future
+  // driver config (or a bad migration) ever returned a string, a
+  // null, or an Invalid Date, the cast would hide it and we'd
+  // silently write garbage into Firestore. Catch that here instead
+  // of relying on types.
+  //
+  // Note that `new Date("not a date")` is still `instanceof Date`,
+  // so we explicitly check `isNaN(.getTime())` — a bare typeof
+  // check would miss Invalid Dates. PR #32 review feedback.
+  const dob = row.date_of_birth;
+  if (!(dob instanceof Date) || Number.isNaN(dob.getTime())) {
+    throw new BackfillError(
+      `child ${row.id} (${row.name}) has invalid date_of_birth: ${String(dob)}`,
+      "INVALID_CHILD_DOB",
+      { childId: row.id, value: dob },
+    );
+  }
+
+  // Runtime validation of `created_at`.
+  //
+  // Same failure mode as DOB: `readChildren()` casts raw rows to
+  // `PgChild[]` with no runtime validation, so a string, null, or
+  // Invalid Date would slip through and land in Firestore verbatim.
+  // We defend here in the pure transform so the check is
+  // unit-testable without Postgres. The value is load-bearing —
+  // `FirestoreChild.createdAt` is required, immutable, and drives
+  // historical ordering, so garbage in would be particularly
+  // expensive to fix after the fact.
+  const createdAt = row.created_at;
+  if (!(createdAt instanceof Date) || Number.isNaN(createdAt.getTime())) {
+    throw new BackfillError(
+      `child ${row.id} (${row.name}) has invalid created_at: ${String(createdAt)}`,
+      "INVALID_CHILD_CREATED_AT",
+      { childId: row.id, value: createdAt },
+    );
+  }
+
   return {
     name: row.name,
+    dateOfBirth: dob,
+    createdAt,
     photoUrl: null,
     balance: toCents(row.balance),
     vaultBalance,
@@ -380,11 +493,16 @@ export function transformTransaction(
       { txnId: row.id, parentId: row.parent_id },
     );
   }
+  const createdAt = validateCreatedAt(
+    row.created_at,
+    "INVALID_TRANSACTION_CREATED_AT",
+    { txnId: row.id },
+  );
   return {
     amount: toCents(row.amount),
     type: row.type,
     description: row.description,
-    createdAt: row.created_at,
+    createdAt,
     createdByUid,
   };
 }
@@ -392,11 +510,16 @@ export function transformTransaction(
 export function transformVaultTransaction(
   row: PgVaultTransaction,
 ): FirestoreVaultTransaction {
+  const createdAt = validateCreatedAt(
+    row.created_at,
+    "INVALID_VAULT_TRANSACTION_CREATED_AT",
+    { vaultTxnId: row.id },
+  );
   return {
     amount: toCents(row.amount),
     type: row.type,
     description: row.description,
-    createdAt: row.created_at,
+    createdAt,
   };
 }
 

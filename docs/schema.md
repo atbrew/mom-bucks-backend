@@ -57,13 +57,15 @@ single `array-contains` query can power the home screen for any parent.
 | Field             | Type                    | Notes                                                                                                                |
 |-------------------|-------------------------|----------------------------------------------------------------------------------------------------------------------|
 | `name`            | `string`                | Child's display name.                                                                                                |
+| `dateOfBirth`     | `Timestamp`             | **Required.** Child's calendar date of birth. Mirrors Flask's `Child.date_of_birth` (`db.Date, nullable=False`). Stored as a `timestamp` but semantically a day — callers should ignore the time-of-day component. Enforced on create by `firestore.rules` and pinned as immutable on update. |
+| `createdAt`       | `Timestamp`             | **Required and immutable.** Instant the child record was created. On the client path, `firestore.rules` forces `createdAt == request.time` — clients must write `serverTimestamp()`, they cannot choose or backdate it. On the backfill path, the Admin SDK carries the Postgres `created_at` through verbatim so historical creation order survives the migration. Any update that touches this field is refused. |
 | `photoUrl`        | `string \| null`        | Path in Storage.                                                                                                     |
 | `balance`         | `integer`               | Spendable balance **in cents** (e.g. `1250` = €12.50). See "Monetary values" below. Maintained by `onTransactionCreate` (#15). |
 | `vaultBalance`    | `integer`               | Locked / saving balance **in cents**.                                                                                |
 | `activeCardId`    | `string \| null`        | Currently active reward card / activity.                                                                             |
 | `allowanceConfig` | `object`                | `{ amount: integer (cents), cadence: 'WEEKLY' \| 'MONTHLY', dayOfWeek: 0..6, ... }`. Drives `sendHabitNotifications` (#17). |
 | `parentUids`      | `string[]`              | **The only relationship that matters.** UIDs allowed to read/write this child and its subcollections.               |
-| `createdByUid`    | `string`                | UID of the parent who created the child. Audit only — does not grant any extra privilege.                            |
+| `createdByUid`    | `string`                | **Required and immutable.** UID of the parent who created the child. On create, `firestore.rules` enforces `createdByUid == request.auth.uid` so a client cannot forge it. On update, it is pinned so a parent cannot rewrite history and reassign "creator" after the fact. Audit only — does not grant any extra privilege. |
 | `lastTxnAt`       | `Timestamp \| null`     | Updated by `onTransactionCreate` (#15).                                                                              |
 | `deletedAt`       | `Timestamp \| null`     | Soft-delete marker (rarely used; hard delete via `onChildDelete` (#16) is the norm).                                 |
 | `version`         | `number`                | Bumped by `onTransactionCreate` so clients can detect stale reads. Replaces Postgres optimistic locking.             |
@@ -76,24 +78,41 @@ single `array-contains` query can power the home screen for any parent.
 
 #### `children/{childId}/transactions/{txnId}`
 
+Ledger rows are **write-once by design**: `amount`, `type`, and
+`createdByUid` are consumed exactly once by `onTransactionCreate`
+(#15) when it bumps `child.balance`, so a post-create client
+mutation would silently desync the derived balance from the stored
+row. `firestore.rules` pins all three as immutable on update (plus
+`createdAt`, same reasoning as children).
+
 | Field         | Type                                  | Notes                                                |
 |---------------|---------------------------------------|------------------------------------------------------|
-| `amount`      | `integer`                             | Always positive, **in cents** (e.g. `500` = €5.00).  |
-| `type`        | `'LODGE' \| 'WITHDRAW'`               | Direction of the transaction.                        |
-| `description` | `string`                              | Free-text reason.                                    |
-| `createdAt`   | `Timestamp`                           | Server timestamp.                                    |
-| `createdByUid`| `string`                              | UID of the parent who logged it.                     |
+| `amount`      | `integer`                             | Always positive, **in cents** (e.g. `500` = €5.00). **Immutable after create** — any update that touches it is refused. |
+| `type`        | `'LODGE' \| 'WITHDRAW'`               | Direction of the transaction. **Immutable after create** — rules refuse a post-create flip, which would re-sign the row against `child.balance`. |
+| `description` | `string`                              | Free-text reason. Mutable — parents can correct typos or tag rows after the fact. |
+| `createdAt`   | `Timestamp`                           | **Required and immutable.** On the client path, `firestore.rules` forces `createdAt == request.time` — clients must write `serverTimestamp()`, they cannot choose or backdate it. On the backfill path, the Admin SDK carries the Postgres `created_at` through verbatim. Any update that touches this field is refused so the ledger audit trail cannot be silently re-stamped. |
+| `createdByUid`| `string`                              | UID of the parent who logged it. **Immutable after create** — audit-only field, rewriting it would forge the trail. |
 
 Triggers: `onTransactionCreate` (#15) recomputes `child.balance`.
 
 #### `children/{childId}/vaultTransactions/{id}`
 
-| Field      | Type                          | Notes                                 |
-|------------|-------------------------------|---------------------------------------|
-| `amount`   | `integer`                     | Positive, **in cents**.               |
-| `type`     | `'DEPOSIT' \| 'WITHDRAW'`     | Direction.                            |
-| `createdAt`| `Timestamp`                   |                                       |
-| `unlockAt` | `Timestamp \| null`           | Time-locked savings; null = unlocked. |
+Like the main transactions ledger, vault rows are **write-once by
+design**. `amount` and `type` are pinned immutable on update because
+they drive `vaultBalance`, interest accrual, and unlock timing — any
+post-create mutation would silently re-sign the row against every
+derived state. Unlike `transactions`, vault rows have no
+`createdByUid` field (the vault ledger is driven by the parent who
+owns the child's `parentUids` membership, not by individual
+authorship).
+
+| Field         | Type                                                      | Notes                                                                                                                                                                                                                                                                                                                                                                                 |
+|---------------|-----------------------------------------------------------|---------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------|
+| `amount`      | `integer`                                                 | Positive, **in cents**. `firestore.rules` enforces `amount is number && amount >= 0` on create; on update, the field is pinned immutable so derived balances cannot silently drift. |
+| `type`        | `'DEPOSIT' \| 'UNLOCK' \| 'INTEREST_CLAIM' \| 'MATCH'`   | Vault event kind. Mirrors Flask's `VaultTransaction` type enum. `firestore.rules` enforces the enum on create (rejecting any other string, including the main-ledger `WITHDRAW`); on update, the field is pinned immutable so a row's sign against `vaultBalance` cannot be flipped after the fact. |
+| `description` | `string`                                                  | Free-text reason (e.g. "weekly interest", "goal unlocked"). Mutable — parents can correct typos. |
+| `createdAt`   | `Timestamp`                                               | **Required and immutable.** Same contract as `transactions.createdAt`: clients must write `serverTimestamp()` (rules pin it to `request.time`), the backfill carries Postgres `created_at` through verbatim, and updates cannot touch the field. Vault ledger drives interest + unlocks, so forged creation timestamps would corrupt those derivations. |
+| `unlockAt`    | `Timestamp \| null`                                       | Time-locked savings; null = unlocked.                                                                                                                                                                                                                                                                                                                                                 |
 
 #### `children/{childId}/activities/{activityId}`
 

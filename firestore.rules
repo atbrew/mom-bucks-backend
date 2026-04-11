@@ -55,6 +55,81 @@ service cloud.firestore {
                 .hasAny(['parentUids']));
     }
 
+    // True iff an update leaves `dateOfBirth` exactly as it was.
+    // Biologically DOB doesn't change, and enforcing it only on
+    // create would be hollow — a signed-in parent could otherwise
+    // strip the field or change it to a non-timestamp post-create
+    // and silently rot the "required" invariant. Called from the
+    // children/{id} update rule below. PR #32 review feedback.
+    function dateOfBirthUnchanged() {
+      return !(request.resource.data.diff(resource.data).affectedKeys()
+                .hasAny(['dateOfBirth']));
+    }
+
+    // True iff an update leaves `createdAt` exactly as it was.
+    // Mirrors `dateOfBirthUnchanged()`: the creation instant is
+    // historical and must never be re-stamped, nulled, or retyped
+    // by a client. Even a `serverTimestamp()` write on UPDATE is
+    // refused here — that would let a parent silently bump an old
+    // doc's "createdAt" to today and corrupt the historical
+    // ordering. Clients write `createdAt` exactly once, at create
+    // time, via `serverTimestamp()` — see the collection create
+    // rules below. Used by children, transactions, and
+    // vaultTransactions.
+    function createdAtUnchanged() {
+      return !(request.resource.data.diff(resource.data).affectedKeys()
+                .hasAny(['createdAt']));
+    }
+
+    // True iff an update leaves `createdByUid` exactly as it was.
+    // `createdByUid` is an audit-only field — it records who
+    // originally created the doc. A post-create mutation would
+    // silently rewrite history; block it. Used by children and
+    // transactions (vaultTransactions has no createdByUid field).
+    // PR #32 review feedback.
+    function createdByUidUnchanged() {
+      return !(request.resource.data.diff(resource.data).affectedKeys()
+                .hasAny(['createdByUid']));
+    }
+
+    // True iff an update to a transaction or vaultTransaction
+    // leaves the three ledger-core fields `amount`, `type`, and
+    // `createdByUid` untouched. Ledger rows are write-once by
+    // design: `onTransactionCreate` (#15) consumes `amount` and
+    // `type` exactly once when computing the new child balance,
+    // so a subsequent client mutation would silently desync
+    // `child.balance` from the ledger. `createdByUid` is audit-
+    // only. Applied on the update path for both the main and
+    // vault ledgers.
+    //
+    // Note: vaultTransactions have no `createdByUid` field (see
+    // `FirestoreVaultTransaction` in `functions/src/backfill/transform.ts`),
+    // so including the key in the affectedKeys check there is
+    // effectively a no-op — the emulator reports `affectedKeys`
+    // only for keys that actually appear in the before or after
+    // document, which `createdByUid` does not. Sharing one helper
+    // across both collections keeps the rule file small without
+    // changing semantics. PR #32 review feedback.
+    function txnCoreUnchanged() {
+      return !(request.resource.data.diff(resource.data).affectedKeys()
+                .hasAny(['amount', 'type', 'createdByUid']));
+    }
+
+    // True iff the incoming `createdAt` is a server-resolved
+    // timestamp — i.e. the client wrote `serverTimestamp()`, which
+    // the rules engine sees as `request.time`. Any other shape
+    // (missing, string, client-chosen Date) fails the comparison.
+    //
+    // Shared by children, transactions, and vaultTransactions. The
+    // point is uniform "no client-chosen creation timestamps" across
+    // every server-authoritative collection — clocks drift, and
+    // backdated ledger entries would corrupt analytics and audit
+    // trails.
+    function createdAtValidOnCreate() {
+      return request.resource.data.createdAt is timestamp
+          && request.resource.data.createdAt == request.time;
+    }
+
     // ─────────────────────────────────────────────────────────────────
     // users/{uid}
     // ─────────────────────────────────────────────────────────────────
@@ -84,18 +159,56 @@ service cloud.firestore {
       // a client could otherwise seed `parentUids: [me, victim]` at
       // creation time and grant access to an unrelated user without
       // going through the invite flow.
+      //
+      // `dateOfBirth` is required and must be a `timestamp`. It
+      // mirrors the Flask `Child.date_of_birth` column
+      // (`db.Date, nullable=False`) — a child cannot be created
+      // without one. The field is pinned at the rules layer so
+      // neither the Phase 2 backfill nor any future client writer
+      // can silently drop it.
+      //
+      // `createdAt` is required and must equal `request.time`.
+      // Clients write it exactly once, at create time, by sending
+      // `serverTimestamp()` — which the server resolves to
+      // `request.time` during rule evaluation. This closes the
+      // door on client-chosen / backdated creation timestamps
+      // (whether from clock drift or deliberate forgery) and
+      // guarantees the historical ordering of new children is
+      // server-authoritative. The Admin-SDK backfill path bypasses
+      // rules and carries the Postgres `created_at` through
+      // verbatim; see `functions/src/backfill/transform.ts`.
+      // On update, `createdAtUnchanged()` (below) refuses any
+      // mutation to the field — including a fresh serverTimestamp()
+      // re-stamp.
+      //
+      // `createdByUid` must equal the caller's own uid. Audit
+      // integrity: without this guard a signed-in parent could
+      // create a child stamped `createdByUid: 'someone_else'` and
+      // silently forge the audit trail. On update,
+      // `createdByUidUnchanged()` (below) pins it so the original
+      // creator identity can never be overwritten after the fact.
+      // PR #32 review feedback.
       allow create: if isSignedIn()
                     && request.resource.data.parentUids is list
                     && request.resource.data.parentUids.size() == 1
-                    && request.resource.data.parentUids[0] == request.auth.uid;
+                    && request.resource.data.parentUids[0] == request.auth.uid
+                    && request.resource.data.createdByUid == request.auth.uid
+                    && request.resource.data.dateOfBirth is timestamp
+                    && createdAtValidOnCreate();
 
       // UPDATE — any current parent can update the child, BUT cannot
-      // directly mutate `parentUids`. Membership changes go through
-      // the acceptInvite (#13) / removeParentFromChildren (#14)
-      // callables.
+      // directly mutate `parentUids`, cannot touch `dateOfBirth`,
+      // cannot touch `createdAt`, and cannot touch `createdByUid`.
+      // See `dateOfBirthUnchanged()`, `createdAtUnchanged()`, and
+      // `createdByUidUnchanged()` above for the rationale.
+      // Membership changes go through the acceptInvite (#13) /
+      // removeParentFromChildren (#14) callables.
       allow update: if isSignedIn()
                     && request.auth.uid in resource.data.parentUids
-                    && parentUidsUnchanged();
+                    && parentUidsUnchanged()
+                    && dateOfBirthUnchanged()
+                    && createdAtUnchanged()
+                    && createdByUidUnchanged();
 
       // DELETE — any current parent can delete the child.
       //
@@ -112,8 +225,8 @@ service cloud.firestore {
       // children/{childId}/transactions/{txnId}
       // ───────────────────────────────────────────────────────────
       //
-      // READ/UPDATE/DELETE are any-parent, same as the rest of the
-      // child's subcollections. CREATE carries two guards:
+      // READ / UPDATE / DELETE are any-parent. CREATE carries three
+      // guards:
       //
       //   1. Shape: `amount` must be a non-negative number. Without
       //      this the overspend check is meaningless — a client
@@ -128,16 +241,25 @@ service cloud.firestore {
       //      child's current `balance` is rejected synchronously at
       //      write time.
       //
-      // Why these live in rules and not the trigger: the trigger
-      // fires AFTER the doc has been written, so it cannot un-do the
-      // write — the best it can do is clamp the resulting balance at
-      // zero and log. Enforcing at the rules layer is the only place
-      // we can refuse the transaction synchronously. The trigger's
-      // clamp-at-zero path remains as defense-in-depth (Admin-SDK
-      // writers bypass rules, and concurrent WITHDRAWs could still
-      // race).
+      //   3. `createdAt` must be a server-resolved timestamp
+      //      (`createdAtValidOnCreate()`). Clients have to write
+      //      `serverTimestamp()` — any client-chosen Date or string
+      //      is refused. This prevents clock-drift and deliberate
+      //      backdating from corrupting the ledger's audit trail.
+      //      On UPDATE, `createdAtUnchanged()` keeps the same field
+      //      immutable so the same parent who wrote the txn cannot
+      //      silently re-stamp it later.
+      //
+      // Why the amount / overspend checks live in rules and not the
+      // trigger: the trigger fires AFTER the doc has been written,
+      // so it cannot un-do the write — the best it can do is clamp
+      // the resulting balance at zero and log. Enforcing at the
+      // rules layer is the only place we can refuse the transaction
+      // synchronously. The trigger's clamp-at-zero path remains as
+      // defense-in-depth (Admin-SDK writers bypass rules, and
+      // concurrent WITHDRAWs could still race).
       match /transactions/{txnId} {
-        allow read, update, delete: if isChildParent(childId);
+        allow read, delete: if isChildParent(childId);
 
         allow create: if isChildParent(childId)
                       && request.resource.data.amount is number
@@ -146,14 +268,57 @@ service cloud.firestore {
                            request.resource.data.type != 'WITHDRAW'
                            || request.resource.data.amount <=
                               get(/databases/$(database)/documents/children/$(childId)).data.balance
-                         );
+                         )
+                      && createdAtValidOnCreate();
+
+        // Updates are still allowed so parents can correct a typo
+        // in `description` or tag a row after the fact, but the
+        // three ledger-core fields (`amount`, `type`,
+        // `createdByUid`) plus `createdAt` are pinned immutable.
+        // See `txnCoreUnchanged()` and `createdAtUnchanged()` above
+        // for the rationale — the short version is that
+        // `onTransactionCreate` consumes `amount` and `type`
+        // exactly once on create to bump `child.balance`, so any
+        // subsequent client mutation would silently desync the
+        // derived balance from the stored ledger.
+        allow update: if isChildParent(childId)
+                      && createdAtUnchanged()
+                      && txnCoreUnchanged();
       }
 
       // ───────────────────────────────────────────────────────────
       // children/{childId}/vaultTransactions/{id}
       // ───────────────────────────────────────────────────────────
+      //
+      // Same story as the main transactions collection: the vault
+      // ledger drives `vaultBalance`, interest, and unlocks, so a
+      // forged or backdated `createdAt` — or a post-create
+      // mutation of `amount` or `type` — would corrupt the audit
+      // trail and any time-based queries. Split the old `read,
+      // write` rule into explicit create / update / delete so we
+      // can pin `createdAt` on create and make the ledger-core
+      // fields immutable on update.
+      //
+      // Shape hardening mirrors the main transactions create rule:
+      // `amount` must be a non-negative number and `type` must be
+      // one of the four `FirestoreVaultTransaction` enum values.
+      // Without these a client could seed `{amount: -1000, type:
+      // 'GARBAGE'}` and land a row no downstream consumer
+      // (balance derivation, interest, unlocks) knows how to
+      // handle.
       match /vaultTransactions/{vaultTxnId} {
-        allow read, write: if isChildParent(childId);
+        allow read, delete: if isChildParent(childId);
+
+        allow create: if isChildParent(childId)
+                      && request.resource.data.amount is number
+                      && request.resource.data.amount >= 0
+                      && request.resource.data.type in
+                         ['DEPOSIT', 'UNLOCK', 'INTEREST_CLAIM', 'MATCH']
+                      && createdAtValidOnCreate();
+
+        allow update: if isChildParent(childId)
+                      && createdAtUnchanged()
+                      && txnCoreUnchanged();
       }
 
       // ───────────────────────────────────────────────────────────
