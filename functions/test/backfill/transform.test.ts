@@ -380,6 +380,21 @@ describe("transformChild", () => {
     expect(out.parentUids).toEqual(["fb-alice", "fb-bob"]);
   });
 
+  it("preserves date_of_birth from PgChild as FirestoreChild.dateOfBirth", () => {
+    // The Flask `Child.date_of_birth` column is `db.Date, nullable=False`
+    // and must survive the backfill into Firestore as a required field.
+    // Previously `transformChild` silently dropped it — this test pins
+    // the contract so it can't regress.
+    const out = transformChild(
+      childRow,
+      ["fb-alice"],
+      "fb-alice",
+      null,
+      0,
+    );
+    expect(out.dateOfBirth).toEqual(new Date("2018-05-01"));
+  });
+
   it("preserves the source version for optimistic-locking continuity", () => {
     const out = transformChild(childRow, ["fb-alice"], "fb-alice", null, 0);
     expect(out.version).toBe(3);

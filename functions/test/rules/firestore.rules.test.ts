@@ -167,11 +167,18 @@ describe("children/{childId}", () => {
   });
 
   describe("create", () => {
+    // Fixed DOB used by the happy-path create tests. A calendar date
+    // (no time-of-day) mirroring the Flask `Child.date_of_birth` column
+    // semantics — Firestore stores it as a `timestamp` but callers
+    // should treat it as a day.
+    const SAM_DOB = new Date("2018-05-01T00:00:00Z");
+
     it("allows creating a child with the caller's own uid in parentUids", async () => {
       const alice = env.authenticatedContext("alice").firestore();
       await assertSucceeds(
         setDoc(doc(alice, "children/sam"), {
           name: "Sam",
+          dateOfBirth: SAM_DOB,
           balance: 0,
           vaultBalance: 0,
           parentUids: ["alice"],
@@ -186,6 +193,7 @@ describe("children/{childId}", () => {
       await assertFails(
         setDoc(doc(alice, "children/sam"), {
           name: "Sam",
+          dateOfBirth: SAM_DOB,
           balance: 0,
           vaultBalance: 0,
           parentUids: ["bob"],
@@ -200,6 +208,7 @@ describe("children/{childId}", () => {
       await assertFails(
         setDoc(doc(alice, "children/sam"), {
           name: "Sam",
+          dateOfBirth: SAM_DOB,
           balance: 0,
           vaultBalance: 0,
           parentUids: [],
@@ -217,6 +226,7 @@ describe("children/{childId}", () => {
       await assertFails(
         setDoc(doc(alice, "children/sam"), {
           name: "Sam",
+          dateOfBirth: SAM_DOB,
           balance: 0,
           vaultBalance: 0,
           parentUids: ["alice", "bob"],
@@ -231,6 +241,7 @@ describe("children/{childId}", () => {
       await assertFails(
         setDoc(doc(anon, "children/sam"), {
           name: "Sam",
+          dateOfBirth: SAM_DOB,
           balance: 0,
           vaultBalance: 0,
           parentUids: ["alice"],
@@ -238,6 +249,61 @@ describe("children/{childId}", () => {
           version: 1,
         }),
       );
+    });
+
+    // ─── dateOfBirth required field ──────────────────────────────
+    //
+    // Mirrors the Flask `Child.date_of_birth` column
+    // (`db.Date, nullable=False`). A child cannot be created without
+    // it. These tests pin the shape check at the rules layer so the
+    // Phase 2 backfill and any future client writers cannot silently
+    // drop the field.
+    describe("dateOfBirth required field", () => {
+      it("denies creating a child with no dateOfBirth field at all", async () => {
+        const alice = env.authenticatedContext("alice").firestore();
+        await assertFails(
+          setDoc(doc(alice, "children/sam"), {
+            name: "Sam",
+            balance: 0,
+            vaultBalance: 0,
+            parentUids: ["alice"],
+            createdByUid: "alice",
+            version: 1,
+          }),
+        );
+      });
+
+      it("denies creating a child whose dateOfBirth is not a timestamp (e.g. a string)", async () => {
+        // A string like "2018-05-01" sneaking through would defeat the
+        // point of storing a real timestamp. Rules must reject it.
+        const alice = env.authenticatedContext("alice").firestore();
+        await assertFails(
+          setDoc(doc(alice, "children/sam"), {
+            name: "Sam",
+            dateOfBirth: "2018-05-01",
+            balance: 0,
+            vaultBalance: 0,
+            parentUids: ["alice"],
+            createdByUid: "alice",
+            version: 1,
+          }),
+        );
+      });
+
+      it("allows creating a child with a valid dateOfBirth timestamp", async () => {
+        const alice = env.authenticatedContext("alice").firestore();
+        await assertSucceeds(
+          setDoc(doc(alice, "children/sam"), {
+            name: "Sam",
+            dateOfBirth: SAM_DOB,
+            balance: 0,
+            vaultBalance: 0,
+            parentUids: ["alice"],
+            createdByUid: "alice",
+            version: 1,
+          }),
+        );
+      });
     });
   });
 

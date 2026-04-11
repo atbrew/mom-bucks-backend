@@ -152,6 +152,15 @@ export interface FirestoreUser {
 
 export interface FirestoreChild {
   name: string;
+  /**
+   * Child's calendar date of birth. Mirrors the Flask
+   * `Child.date_of_birth` column (`db.Date, nullable=False`) — it is
+   * required on every child and never null. Stored as a Firestore
+   * `timestamp` (the Admin SDK converts the JS `Date` we hand it on
+   * write), but semantically it's a day: callers should ignore the
+   * time-of-day component.
+   */
+  dateOfBirth: Date;
   photoUrl: string | null;
   balance: number; // integer cents
   vaultBalance: number; // integer cents
@@ -357,6 +366,14 @@ export function transformChild(
   }
   return {
     name: row.name,
+    // The `pg` driver returns a Postgres `DATE` column as a JS `Date`
+    // pointing at midnight UTC of that calendar day, which is what
+    // we want to hand to the Admin SDK — it will serialise to a
+    // Firestore `timestamp`. Carry through verbatim; do NOT
+    // re-parse. The value is load-bearing: every child row in
+    // Postgres has a non-null date_of_birth (`db.Date, nullable=False`
+    // in Flask) so we can assume it here.
+    dateOfBirth: row.date_of_birth,
     photoUrl: null,
     balance: toCents(row.balance),
     vaultBalance,

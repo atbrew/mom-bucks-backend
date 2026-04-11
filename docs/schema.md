@@ -57,6 +57,7 @@ single `array-contains` query can power the home screen for any parent.
 | Field             | Type                    | Notes                                                                                                                |
 |-------------------|-------------------------|----------------------------------------------------------------------------------------------------------------------|
 | `name`            | `string`                | Child's display name.                                                                                                |
+| `dateOfBirth`     | `Timestamp`             | **Required.** Child's calendar date of birth. Mirrors Flask's `Child.date_of_birth` (`db.Date, nullable=False`). Stored as a `timestamp` but semantically a day — callers should ignore the time-of-day component. Enforced on create by `firestore.rules`. |
 | `photoUrl`        | `string \| null`        | Path in Storage.                                                                                                     |
 | `balance`         | `integer`               | Spendable balance **in cents** (e.g. `1250` = €12.50). See "Monetary values" below. Maintained by `onTransactionCreate` (#15). |
 | `vaultBalance`    | `integer`               | Locked / saving balance **in cents**.                                                                                |

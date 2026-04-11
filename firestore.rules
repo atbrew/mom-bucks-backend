@@ -84,10 +84,18 @@ service cloud.firestore {
       // a client could otherwise seed `parentUids: [me, victim]` at
       // creation time and grant access to an unrelated user without
       // going through the invite flow.
+      //
+      // `dateOfBirth` is required and must be a `timestamp`. It
+      // mirrors the Flask `Child.date_of_birth` column
+      // (`db.Date, nullable=False`) — a child cannot be created
+      // without one. The field is pinned at the rules layer so
+      // neither the Phase 2 backfill nor any future client writer
+      // can silently drop it.
       allow create: if isSignedIn()
                     && request.resource.data.parentUids is list
                     && request.resource.data.parentUids.size() == 1
-                    && request.resource.data.parentUids[0] == request.auth.uid;
+                    && request.resource.data.parentUids[0] == request.auth.uid
+                    && request.resource.data.dateOfBirth is timestamp;
 
       // UPDATE — any current parent can update the child, BUT cannot
       // directly mutate `parentUids`. Membership changes go through
