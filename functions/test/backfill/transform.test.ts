@@ -409,6 +409,53 @@ describe("transformChild", () => {
       expect((err as BackfillError).code).toBe("ORPHAN_CHILD");
     }
   });
+
+  // ─── dateOfBirth runtime validation ──────────────────────────────
+  //
+  // Copilot flagged on PR #32 that `readChildren()` casts raw pg
+  // rows to `PgChild[]` with no runtime validation. If a future
+  // driver config (or a bad migration) ever returned `date_of_birth`
+  // as a string or null, the cast would hide it and the Admin SDK
+  // would write garbage into Firestore. Rather than add runtime type
+  // validation at the I/O layer, we defend in the pure transform:
+  // `transformChild` refuses to build a doc if the incoming
+  // `date_of_birth` isn't a real `Date`. That keeps the check
+  // unit-testable without spinning up Postgres.
+  it("throws INVALID_CHILD_DOB when date_of_birth is a string instead of a Date", () => {
+    const bad = { ...childRow, date_of_birth: "2018-05-01" as unknown as Date };
+    try {
+      transformChild(bad, ["fb-alice"], "fb-alice", null, 0);
+      throw new Error("should have thrown");
+    } catch (err) {
+      expect(err).toBeInstanceOf(BackfillError);
+      expect((err as BackfillError).code).toBe("INVALID_CHILD_DOB");
+    }
+  });
+
+  it("throws INVALID_CHILD_DOB when date_of_birth is null", () => {
+    const bad = { ...childRow, date_of_birth: null as unknown as Date };
+    try {
+      transformChild(bad, ["fb-alice"], "fb-alice", null, 0);
+      throw new Error("should have thrown");
+    } catch (err) {
+      expect(err).toBeInstanceOf(BackfillError);
+      expect((err as BackfillError).code).toBe("INVALID_CHILD_DOB");
+    }
+  });
+
+  it("throws INVALID_CHILD_DOB when date_of_birth is an Invalid Date", () => {
+    // `new Date("not a date")` constructs a Date whose .getTime() is
+    // NaN. It's still `instanceof Date`, so a bare typeof check would
+    // miss it — the validator has to inspect .getTime().
+    const bad = { ...childRow, date_of_birth: new Date("not a date") };
+    try {
+      transformChild(bad, ["fb-alice"], "fb-alice", null, 0);
+      throw new Error("should have thrown");
+    } catch (err) {
+      expect(err).toBeInstanceOf(BackfillError);
+      expect((err as BackfillError).code).toBe("INVALID_CHILD_DOB");
+    }
+  });
 });
 
 // ─── transformTransaction ───────────────────────────────────────────

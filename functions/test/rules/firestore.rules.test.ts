@@ -72,6 +72,13 @@ beforeEach(async () => {
 // we can set up arbitrary initial state (including parentUids arrays
 // that legitimate clients could never write directly).
 
+// Default DOB for seeded children. Real children always have one
+// (enforced at create-time by rules), so every realistic fixture
+// should carry one too — otherwise the update-time DOB guards below
+// can't be exercised. Tests that need a specific DOB override via
+// the `extra` argument.
+const DEFAULT_SEED_DOB = new Date("2018-05-01T00:00:00Z");
+
 async function seedChild(
   childId: string,
   parentUids: string[],
@@ -81,6 +88,7 @@ async function seedChild(
     const db = ctx.firestore();
     await setDoc(doc(db, "children", childId), {
       name: childId,
+      dateOfBirth: DEFAULT_SEED_DOB,
       balance: 0,
       vaultBalance: 0,
       parentUids,
@@ -340,6 +348,64 @@ describe("children/{childId}", () => {
       await assertFails(
         updateDoc(doc(alice, "children/sam"), { parentUids: ["alice"] }),
       );
+    });
+
+    // ─── dateOfBirth is immutable after create ───────────────────
+    //
+    // The reviewers on PR #32 flagged that enforcing `dateOfBirth`
+    // only on create is a hollow guarantee: a signed-in parent could
+    // then update the child doc, strip the field, or change it to a
+    // different value, and the "required" invariant would silently
+    // rot. Biologically DOB doesn't change, so the simplest fix is
+    // to pin it as immutable at the rules layer. These tests lock in
+    // that behaviour.
+    describe("dateOfBirth immutability on update", () => {
+      it("denies an update that sets dateOfBirth to a different timestamp", async () => {
+        await seedChild("sam", ["alice"]);
+        const alice = env.authenticatedContext("alice").firestore();
+        await assertFails(
+          updateDoc(doc(alice, "children/sam"), {
+            dateOfBirth: new Date("2019-06-01T00:00:00Z"),
+          }),
+        );
+      });
+
+      it("denies an update that removes dateOfBirth (FieldValue.delete equivalent)", async () => {
+        // The Firestore web SDK uses `deleteField()` from
+        // firebase/firestore, but re-exporting it would widen the
+        // test's import surface. A `null` write is functionally the
+        // same shape-check failure path — not a timestamp — so this
+        // covers the "delete" case at the rules layer even without
+        // pulling in the deleteField sentinel.
+        await seedChild("sam", ["alice"]);
+        const alice = env.authenticatedContext("alice").firestore();
+        await assertFails(
+          updateDoc(doc(alice, "children/sam"), {
+            dateOfBirth: null,
+          }),
+        );
+      });
+
+      it("denies an update that sets dateOfBirth to a non-timestamp (e.g. a string)", async () => {
+        await seedChild("sam", ["alice"]);
+        const alice = env.authenticatedContext("alice").firestore();
+        await assertFails(
+          updateDoc(doc(alice, "children/sam"), {
+            dateOfBirth: "2019-06-01",
+          }),
+        );
+      });
+
+      it("allows a name update that does not touch dateOfBirth", async () => {
+        // Regression guard: the update rule must not become so strict
+        // that ordinary field updates (rename, balance bumps, etc.)
+        // get denied just because DOB is in the doc.
+        await seedChild("sam", ["alice"]);
+        const alice = env.authenticatedContext("alice").firestore();
+        await assertSucceeds(
+          updateDoc(doc(alice, "children/sam"), { name: "Samuel" }),
+        );
+      });
     });
   });
 

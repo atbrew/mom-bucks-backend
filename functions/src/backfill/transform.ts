@@ -223,7 +223,8 @@ export class BackfillError extends Error {
       | "ORPHAN_CHILD"
       | "ORPHAN_TRANSACTION"
       | "ORPHAN_VAULT_TXN"
-      | "INVALID_AMOUNT",
+      | "INVALID_AMOUNT"
+      | "INVALID_CHILD_DOB",
     public readonly context: Record<string, unknown> = {},
   ) {
     super(message);
@@ -364,16 +365,34 @@ export function transformChild(
       { childId: row.id, postgresParentId: row.parent_id },
     );
   }
+
+  // Runtime validation of `date_of_birth`.
+  //
+  // The `pg` driver returns a Postgres `DATE` column as a JS `Date`
+  // at midnight UTC of that calendar day by default, which is what
+  // we want to hand to the Admin SDK — it will serialise to a
+  // Firestore `timestamp`. `readChildren()` casts `res.rows` to
+  // `PgChild[]` without runtime validation though, so if a future
+  // driver config (or a bad migration) ever returned a string, a
+  // null, or an Invalid Date, the cast would hide it and we'd
+  // silently write garbage into Firestore. Catch that here instead
+  // of relying on types.
+  //
+  // Note that `new Date("not a date")` is still `instanceof Date`,
+  // so we explicitly check `isNaN(.getTime())` — a bare typeof
+  // check would miss Invalid Dates. PR #32 review feedback.
+  const dob = row.date_of_birth;
+  if (!(dob instanceof Date) || Number.isNaN(dob.getTime())) {
+    throw new BackfillError(
+      `child ${row.id} (${row.name}) has invalid date_of_birth: ${String(dob)}`,
+      "INVALID_CHILD_DOB",
+      { childId: row.id, value: dob },
+    );
+  }
+
   return {
     name: row.name,
-    // The `pg` driver returns a Postgres `DATE` column as a JS `Date`
-    // pointing at midnight UTC of that calendar day, which is what
-    // we want to hand to the Admin SDK — it will serialise to a
-    // Firestore `timestamp`. Carry through verbatim; do NOT
-    // re-parse. The value is load-bearing: every child row in
-    // Postgres has a non-null date_of_birth (`db.Date, nullable=False`
-    // in Flask) so we can assume it here.
-    dateOfBirth: row.date_of_birth,
+    dateOfBirth: dob,
     photoUrl: null,
     balance: toCents(row.balance),
     vaultBalance,

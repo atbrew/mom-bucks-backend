@@ -55,6 +55,17 @@ service cloud.firestore {
                 .hasAny(['parentUids']));
     }
 
+    // True iff an update leaves `dateOfBirth` exactly as it was.
+    // Biologically DOB doesn't change, and enforcing it only on
+    // create would be hollow — a signed-in parent could otherwise
+    // strip the field or change it to a non-timestamp post-create
+    // and silently rot the "required" invariant. Called from the
+    // children/{id} update rule below. PR #32 review feedback.
+    function dateOfBirthUnchanged() {
+      return !(request.resource.data.diff(resource.data).affectedKeys()
+                .hasAny(['dateOfBirth']));
+    }
+
     // ─────────────────────────────────────────────────────────────────
     // users/{uid}
     // ─────────────────────────────────────────────────────────────────
@@ -98,12 +109,14 @@ service cloud.firestore {
                     && request.resource.data.dateOfBirth is timestamp;
 
       // UPDATE — any current parent can update the child, BUT cannot
-      // directly mutate `parentUids`. Membership changes go through
-      // the acceptInvite (#13) / removeParentFromChildren (#14)
-      // callables.
+      // directly mutate `parentUids` and cannot touch `dateOfBirth`
+      // (see `dateOfBirthUnchanged()` above for the rationale).
+      // Membership changes go through the acceptInvite (#13) /
+      // removeParentFromChildren (#14) callables.
       allow update: if isSignedIn()
                     && request.auth.uid in resource.data.parentUids
-                    && parentUidsUnchanged();
+                    && parentUidsUnchanged()
+                    && dateOfBirthUnchanged();
 
       // DELETE — any current parent can delete the child.
       //
