@@ -521,6 +521,8 @@ describe("transformChild", () => {
 // ─── transformTransaction ───────────────────────────────────────────
 
 describe("transformTransaction", () => {
+  const TXN_CREATED_AT = new Date("2025-06-01T14:22:00Z");
+
   const txn: PgTransaction = {
     id: "t-1",
     child_id: "c-sam",
@@ -528,7 +530,7 @@ describe("transformTransaction", () => {
     type: "LODGE",
     amount: "5.00",
     description: "chore bonus",
-    created_at: new Date("2025-06-01"),
+    created_at: TXN_CREATED_AT,
     version: 1,
   };
 
@@ -549,35 +551,144 @@ describe("transformTransaction", () => {
       expect((err as BackfillError).code).toBe("ORPHAN_TRANSACTION");
     }
   });
+
+  // ─── createdAt carry-through + runtime validation ─────────────────
+  //
+  // Rolls the strict createdAt pattern onto the ledger path. The
+  // transform previously carried `row.created_at` through verbatim
+  // with no runtime validation, so a string, null, or Invalid Date
+  // coming out of `pg` (misconfigured driver, bad migration) would
+  // land in Firestore as garbage. Ledger rows are load-bearing, so
+  // the transform refuses to build a doc it can't trust.
+  it("preserves created_at from PgTransaction as FirestoreTransaction.createdAt", () => {
+    const out = transformTransaction(txn, "fb-alice");
+    expect(out.createdAt).toEqual(TXN_CREATED_AT);
+  });
+
+  it("throws INVALID_TRANSACTION_CREATED_AT when created_at is a string", () => {
+    const bad = {
+      ...txn,
+      created_at: "2025-06-01T14:22:00Z" as unknown as Date,
+    };
+    try {
+      transformTransaction(bad, "fb-alice");
+      throw new Error("should have thrown");
+    } catch (err) {
+      expect(err).toBeInstanceOf(BackfillError);
+      expect((err as BackfillError).code).toBe(
+        "INVALID_TRANSACTION_CREATED_AT",
+      );
+    }
+  });
+
+  it("throws INVALID_TRANSACTION_CREATED_AT when created_at is null", () => {
+    const bad = { ...txn, created_at: null as unknown as Date };
+    try {
+      transformTransaction(bad, "fb-alice");
+      throw new Error("should have thrown");
+    } catch (err) {
+      expect(err).toBeInstanceOf(BackfillError);
+      expect((err as BackfillError).code).toBe(
+        "INVALID_TRANSACTION_CREATED_AT",
+      );
+    }
+  });
+
+  it("throws INVALID_TRANSACTION_CREATED_AT when created_at is an Invalid Date", () => {
+    const bad = { ...txn, created_at: new Date("not a date") };
+    try {
+      transformTransaction(bad, "fb-alice");
+      throw new Error("should have thrown");
+    } catch (err) {
+      expect(err).toBeInstanceOf(BackfillError);
+      expect((err as BackfillError).code).toBe(
+        "INVALID_TRANSACTION_CREATED_AT",
+      );
+    }
+  });
 });
 
 // ─── transformVaultTransaction ──────────────────────────────────────
 
 describe("transformVaultTransaction", () => {
+  const VAULT_TXN_CREATED_AT = new Date("2025-07-15T09:00:00Z");
+
+  const baseRow: PgVaultTransaction = {
+    id: "vt-1",
+    vault_id: "v-1",
+    amount: "10.00",
+    type: "DEPOSIT",
+    description: "initial deposit",
+    created_at: VAULT_TXN_CREATED_AT,
+  };
+
   it("maps a vault DEPOSIT", () => {
-    const row: PgVaultTransaction = {
-      id: "vt-1",
-      vault_id: "v-1",
-      amount: "10.00",
-      type: "DEPOSIT",
-      description: "initial deposit",
-      created_at: new Date(),
-    };
-    const out = transformVaultTransaction(row);
+    const out = transformVaultTransaction(baseRow);
     expect(out.amount).toBe(1000);
     expect(out.type).toBe("DEPOSIT");
   });
 
   it("preserves source-specific INTEREST_CLAIM / MATCH types", () => {
     const row: PgVaultTransaction = {
+      ...baseRow,
       id: "vt-2",
-      vault_id: "v-1",
       amount: "0.37",
       type: "INTEREST_CLAIM",
       description: "weekly interest",
-      created_at: new Date(),
     };
     expect(transformVaultTransaction(row).type).toBe("INTEREST_CLAIM");
+  });
+
+  // ─── createdAt carry-through + runtime validation ─────────────────
+  //
+  // Same rationale as transformTransaction: ledger rows must be
+  // trustworthy end-to-end. The transform is the last checkpoint
+  // before Firestore so a bad Postgres value gets caught here.
+  it("preserves created_at from PgVaultTransaction as FirestoreVaultTransaction.createdAt", () => {
+    const out = transformVaultTransaction(baseRow);
+    expect(out.createdAt).toEqual(VAULT_TXN_CREATED_AT);
+  });
+
+  it("throws INVALID_VAULT_TRANSACTION_CREATED_AT when created_at is a string", () => {
+    const bad = {
+      ...baseRow,
+      created_at: "2025-07-15T09:00:00Z" as unknown as Date,
+    };
+    try {
+      transformVaultTransaction(bad);
+      throw new Error("should have thrown");
+    } catch (err) {
+      expect(err).toBeInstanceOf(BackfillError);
+      expect((err as BackfillError).code).toBe(
+        "INVALID_VAULT_TRANSACTION_CREATED_AT",
+      );
+    }
+  });
+
+  it("throws INVALID_VAULT_TRANSACTION_CREATED_AT when created_at is null", () => {
+    const bad = { ...baseRow, created_at: null as unknown as Date };
+    try {
+      transformVaultTransaction(bad);
+      throw new Error("should have thrown");
+    } catch (err) {
+      expect(err).toBeInstanceOf(BackfillError);
+      expect((err as BackfillError).code).toBe(
+        "INVALID_VAULT_TRANSACTION_CREATED_AT",
+      );
+    }
+  });
+
+  it("throws INVALID_VAULT_TRANSACTION_CREATED_AT when created_at is an Invalid Date", () => {
+    const bad = { ...baseRow, created_at: new Date("not a date") };
+    try {
+      transformVaultTransaction(bad);
+      throw new Error("should have thrown");
+    } catch (err) {
+      expect(err).toBeInstanceOf(BackfillError);
+      expect((err as BackfillError).code).toBe(
+        "INVALID_VAULT_TRANSACTION_CREATED_AT",
+      );
+    }
   });
 });
 

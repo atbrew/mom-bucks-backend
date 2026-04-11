@@ -83,19 +83,19 @@ single `array-contains` query can power the home screen for any parent.
 | `amount`      | `integer`                             | Always positive, **in cents** (e.g. `500` = €5.00).  |
 | `type`        | `'LODGE' \| 'WITHDRAW'`               | Direction of the transaction.                        |
 | `description` | `string`                              | Free-text reason.                                    |
-| `createdAt`   | `Timestamp`                           | Server timestamp.                                    |
+| `createdAt`   | `Timestamp`                           | **Required and immutable.** On the client path, `firestore.rules` forces `createdAt == request.time` — clients must write `serverTimestamp()`, they cannot choose or backdate it. On the backfill path, the Admin SDK carries the Postgres `created_at` through verbatim. Any update that touches this field is refused so the ledger audit trail cannot be silently re-stamped. |
 | `createdByUid`| `string`                              | UID of the parent who logged it.                     |
 
 Triggers: `onTransactionCreate` (#15) recomputes `child.balance`.
 
 #### `children/{childId}/vaultTransactions/{id}`
 
-| Field      | Type                          | Notes                                 |
-|------------|-------------------------------|---------------------------------------|
-| `amount`   | `integer`                     | Positive, **in cents**.               |
-| `type`     | `'DEPOSIT' \| 'WITHDRAW'`     | Direction.                            |
-| `createdAt`| `Timestamp`                   |                                       |
-| `unlockAt` | `Timestamp \| null`           | Time-locked savings; null = unlocked. |
+| Field       | Type                          | Notes                                                                                                                                                                                                                                                                                                                                                                                 |
+|-------------|-------------------------------|---------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------|
+| `amount`    | `integer`                     | Positive, **in cents**.                                                                                                                                                                                                                                                                                                                                                               |
+| `type`      | `'DEPOSIT' \| 'WITHDRAW'`     | Direction.                                                                                                                                                                                                                                                                                                                                                                            |
+| `createdAt` | `Timestamp`                   | **Required and immutable.** Same contract as `transactions.createdAt`: clients must write `serverTimestamp()` (rules pin it to `request.time`), the backfill carries Postgres `created_at` through verbatim, and updates cannot touch the field. Vault ledger drives interest + unlocks, so forged creation timestamps would corrupt those derivations. |
+| `unlockAt`  | `Timestamp \| null`           | Time-locked savings; null = unlocked.                                                                                                                                                                                                                                                                                                                                                 |
 
 #### `children/{childId}/activities/{activityId}`
 

@@ -71,13 +71,29 @@ service cloud.firestore {
     // historical and must never be re-stamped, nulled, or retyped
     // by a client. Even a `serverTimestamp()` write on UPDATE is
     // refused here — that would let a parent silently bump an old
-    // child's "createdAt" to today and corrupt the historical
+    // doc's "createdAt" to today and corrupt the historical
     // ordering. Clients write `createdAt` exactly once, at create
-    // time, via `serverTimestamp()` — see the `children/{id}`
-    // create rule below.
+    // time, via `serverTimestamp()` — see the collection create
+    // rules below. Used by children, transactions, and
+    // vaultTransactions.
     function createdAtUnchanged() {
       return !(request.resource.data.diff(resource.data).affectedKeys()
                 .hasAny(['createdAt']));
+    }
+
+    // True iff the incoming `createdAt` is a server-resolved
+    // timestamp — i.e. the client wrote `serverTimestamp()`, which
+    // the rules engine sees as `request.time`. Any other shape
+    // (missing, string, client-chosen Date) fails the comparison.
+    //
+    // Shared by children, transactions, and vaultTransactions. The
+    // point is uniform "no client-chosen creation timestamps" across
+    // every server-authoritative collection — clocks drift, and
+    // backdated ledger entries would corrupt analytics and audit
+    // trails.
+    function createdAtValidOnCreate() {
+      return request.resource.data.createdAt is timestamp
+          && request.resource.data.createdAt == request.time;
     }
 
     // ─────────────────────────────────────────────────────────────────
@@ -135,8 +151,7 @@ service cloud.firestore {
                     && request.resource.data.parentUids.size() == 1
                     && request.resource.data.parentUids[0] == request.auth.uid
                     && request.resource.data.dateOfBirth is timestamp
-                    && request.resource.data.createdAt is timestamp
-                    && request.resource.data.createdAt == request.time;
+                    && createdAtValidOnCreate();
 
       // UPDATE — any current parent can update the child, BUT cannot
       // directly mutate `parentUids`, cannot touch `dateOfBirth`, and
@@ -165,8 +180,8 @@ service cloud.firestore {
       // children/{childId}/transactions/{txnId}
       // ───────────────────────────────────────────────────────────
       //
-      // READ/UPDATE/DELETE are any-parent, same as the rest of the
-      // child's subcollections. CREATE carries two guards:
+      // READ / UPDATE / DELETE are any-parent. CREATE carries three
+      // guards:
       //
       //   1. Shape: `amount` must be a non-negative number. Without
       //      this the overspend check is meaningless — a client
@@ -181,16 +196,25 @@ service cloud.firestore {
       //      child's current `balance` is rejected synchronously at
       //      write time.
       //
-      // Why these live in rules and not the trigger: the trigger
-      // fires AFTER the doc has been written, so it cannot un-do the
-      // write — the best it can do is clamp the resulting balance at
-      // zero and log. Enforcing at the rules layer is the only place
-      // we can refuse the transaction synchronously. The trigger's
-      // clamp-at-zero path remains as defense-in-depth (Admin-SDK
-      // writers bypass rules, and concurrent WITHDRAWs could still
-      // race).
+      //   3. `createdAt` must be a server-resolved timestamp
+      //      (`createdAtValidOnCreate()`). Clients have to write
+      //      `serverTimestamp()` — any client-chosen Date or string
+      //      is refused. This prevents clock-drift and deliberate
+      //      backdating from corrupting the ledger's audit trail.
+      //      On UPDATE, `createdAtUnchanged()` keeps the same field
+      //      immutable so the same parent who wrote the txn cannot
+      //      silently re-stamp it later.
+      //
+      // Why the amount / overspend checks live in rules and not the
+      // trigger: the trigger fires AFTER the doc has been written,
+      // so it cannot un-do the write — the best it can do is clamp
+      // the resulting balance at zero and log. Enforcing at the
+      // rules layer is the only place we can refuse the transaction
+      // synchronously. The trigger's clamp-at-zero path remains as
+      // defense-in-depth (Admin-SDK writers bypass rules, and
+      // concurrent WITHDRAWs could still race).
       match /transactions/{txnId} {
-        allow read, update, delete: if isChildParent(childId);
+        allow read, delete: if isChildParent(childId);
 
         allow create: if isChildParent(childId)
                       && request.resource.data.amount is number
@@ -199,14 +223,32 @@ service cloud.firestore {
                            request.resource.data.type != 'WITHDRAW'
                            || request.resource.data.amount <=
                               get(/databases/$(database)/documents/children/$(childId)).data.balance
-                         );
+                         )
+                      && createdAtValidOnCreate();
+
+        allow update: if isChildParent(childId)
+                      && createdAtUnchanged();
       }
 
       // ───────────────────────────────────────────────────────────
       // children/{childId}/vaultTransactions/{id}
       // ───────────────────────────────────────────────────────────
+      //
+      // Same story as the main transactions collection: the vault
+      // ledger drives `vaultBalance`, interest, and unlocks, so a
+      // forged or backdated `createdAt` would corrupt the audit
+      // trail and any time-based queries. Split the old `read,
+      // write` rule into explicit create / update / delete so we
+      // can pin `createdAt` on create and make it immutable on
+      // update.
       match /vaultTransactions/{vaultTxnId} {
-        allow read, write: if isChildParent(childId);
+        allow read, delete: if isChildParent(childId);
+
+        allow create: if isChildParent(childId)
+                      && createdAtValidOnCreate();
+
+        allow update: if isChildParent(childId)
+                      && createdAtUnchanged();
       }
 
       // ───────────────────────────────────────────────────────────

@@ -623,6 +623,7 @@ describe("children/{childId}/transactions/{txnId}", () => {
         type: "LODGE",
         description: "chore",
         createdByUid: "alice",
+        createdAt: serverTimestamp(),
       }),
     );
   });
@@ -667,6 +668,7 @@ describe("children/{childId}/transactions/{txnId}", () => {
           type: "WITHDRAW",
           description: "treat",
           createdByUid: "alice",
+          createdAt: serverTimestamp(),
         }),
       );
     });
@@ -680,6 +682,7 @@ describe("children/{childId}/transactions/{txnId}", () => {
           type: "WITHDRAW",
           description: "payout",
           createdByUid: "alice",
+          createdAt: serverTimestamp(),
         }),
       );
     });
@@ -693,6 +696,7 @@ describe("children/{childId}/transactions/{txnId}", () => {
           type: "WITHDRAW",
           description: "overspend by one cent",
           createdByUid: "alice",
+          createdAt: serverTimestamp(),
         }),
       );
     });
@@ -706,6 +710,7 @@ describe("children/{childId}/transactions/{txnId}", () => {
           type: "WITHDRAW",
           description: "cold wallet",
           createdByUid: "alice",
+          createdAt: serverTimestamp(),
         }),
       );
     });
@@ -721,6 +726,7 @@ describe("children/{childId}/transactions/{txnId}", () => {
           type: "LODGE",
           description: "seed",
           createdByUid: "alice",
+          createdAt: serverTimestamp(),
         }),
       );
     });
@@ -742,6 +748,7 @@ describe("children/{childId}/transactions/{txnId}", () => {
           type: "WITHDRAW",
           description: "negative withdraw",
           createdByUid: "alice",
+          createdAt: serverTimestamp(),
         }),
       );
     });
@@ -755,6 +762,136 @@ describe("children/{childId}/transactions/{txnId}", () => {
           type: "LODGE",
           description: "negative lodge",
           createdByUid: "alice",
+          createdAt: serverTimestamp(),
+        }),
+      );
+    });
+  });
+
+  // ─── createdAt required + bound to request.time on create ────────
+  //
+  // Ledger rows must be server-stamped. Without this guard a client
+  // could backdate (or forward-date) a transaction, which would
+  // corrupt audit trails and defeat any future "transactions in the
+  // last 7 days" query. Mirrors the children `createdAt` pattern
+  // from 327e98f — rules refuse any write that doesn't resolve to
+  // `request.time`.
+  describe("createdAt required and bound to request.time on create", () => {
+    it("denies creating a transaction with no createdAt field", async () => {
+      await seedChild("sam", ["alice"], { balance: 1000 });
+      const alice = env.authenticatedContext("alice").firestore();
+      await assertFails(
+        setDoc(doc(alice, "children/sam/transactions/t1"), {
+          amount: 500,
+          type: "LODGE",
+          description: "chore",
+          createdByUid: "alice",
+        }),
+      );
+    });
+
+    it("denies creating a transaction whose createdAt is a string", async () => {
+      await seedChild("sam", ["alice"], { balance: 1000 });
+      const alice = env.authenticatedContext("alice").firestore();
+      await assertFails(
+        setDoc(doc(alice, "children/sam/transactions/t1"), {
+          amount: 500,
+          type: "LODGE",
+          description: "chore",
+          createdByUid: "alice",
+          createdAt: "2025-06-01T14:22:00Z",
+        }),
+      );
+    });
+
+    it("denies creating a transaction whose createdAt is a client-chosen Date", async () => {
+      // Client clocks drift. Deliberate backdating is worse.
+      // The only legitimate way to write `createdAt` is via
+      // `serverTimestamp()`, which the rule sees as `request.time`.
+      await seedChild("sam", ["alice"], { balance: 1000 });
+      const alice = env.authenticatedContext("alice").firestore();
+      await assertFails(
+        setDoc(doc(alice, "children/sam/transactions/t1"), {
+          amount: 500,
+          type: "LODGE",
+          description: "chore",
+          createdByUid: "alice",
+          createdAt: new Date("2020-01-01T00:00:00Z"),
+        }),
+      );
+    });
+
+    it("allows creating a transaction with createdAt = serverTimestamp()", async () => {
+      await seedChild("sam", ["alice"], { balance: 1000 });
+      const alice = env.authenticatedContext("alice").firestore();
+      await assertSucceeds(
+        setDoc(doc(alice, "children/sam/transactions/t1"), {
+          amount: 500,
+          type: "LODGE",
+          description: "chore",
+          createdByUid: "alice",
+          createdAt: serverTimestamp(),
+        }),
+      );
+    });
+  });
+
+  // ─── createdAt immutability on update ────────────────────────────
+  //
+  // The existing rules allow `update` on transactions (parents can
+  // correct a typo in `description`, tag a txn, etc.). Without an
+  // immutability pin, that same UPDATE path would let a parent
+  // silently re-stamp the ledger entry's `createdAt`. Mirrors the
+  // children `createdAtUnchanged()` pattern.
+  describe("createdAt immutability on update", () => {
+    async function seedTransaction(
+      childId: string,
+      txnId: string,
+    ): Promise<void> {
+      await env.withSecurityRulesDisabled(async (ctx) => {
+        await setDoc(
+          doc(ctx.firestore(), `children/${childId}/transactions/${txnId}`),
+          {
+            amount: 500,
+            type: "LODGE",
+            description: "chore",
+            createdByUid: "alice",
+            createdAt: new Date("2025-06-01T14:22:00Z"),
+          },
+        );
+      });
+    }
+
+    it("denies an update that sets createdAt to a different timestamp", async () => {
+      await seedChild("sam", ["alice"]);
+      await seedTransaction("sam", "t1");
+      const alice = env.authenticatedContext("alice").firestore();
+      await assertFails(
+        updateDoc(doc(alice, "children/sam/transactions/t1"), {
+          createdAt: new Date("2026-01-01T00:00:00Z"),
+        }),
+      );
+    });
+
+    it("denies an update that re-stamps createdAt via serverTimestamp()", async () => {
+      await seedChild("sam", ["alice"]);
+      await seedTransaction("sam", "t1");
+      const alice = env.authenticatedContext("alice").firestore();
+      await assertFails(
+        updateDoc(doc(alice, "children/sam/transactions/t1"), {
+          createdAt: serverTimestamp(),
+        }),
+      );
+    });
+
+    it("allows a description update that does not touch createdAt", async () => {
+      // Regression guard: non-createdAt updates must continue to work.
+      await seedChild("sam", ["alice"]);
+      await seedTransaction("sam", "t1");
+      const alice = env.authenticatedContext("alice").firestore();
+      await assertSucceeds(
+        updateDoc(doc(alice, "children/sam/transactions/t1"), {
+          description: "chore (corrected)",
         }),
       );
     });
@@ -800,6 +937,7 @@ describe("children/{childId}/vaultTransactions/{id}", () => {
       setDoc(doc(alice, "children/sam/vaultTransactions/v1"), {
         amount: 1000,
         type: "DEPOSIT",
+        createdAt: serverTimestamp(),
       }),
     );
   });
@@ -811,8 +949,124 @@ describe("children/{childId}/vaultTransactions/{id}", () => {
       setDoc(doc(bob, "children/sam/vaultTransactions/v1"), {
         amount: 1000,
         type: "DEPOSIT",
+        createdAt: serverTimestamp(),
       }),
     );
+  });
+
+  // ─── createdAt required + bound to request.time on create ────────
+  //
+  // Same rationale as the main transactions collection. The vault
+  // ledger is equally load-bearing — it drives interest, unlocks,
+  // and vaultBalance — so a client cannot be allowed to pick or
+  // backdate the creation timestamp on vault transactions either.
+  describe("createdAt required and bound to request.time on create", () => {
+    it("denies creating a vault transaction with no createdAt field", async () => {
+      await seedChild("sam", ["alice"]);
+      const alice = env.authenticatedContext("alice").firestore();
+      await assertFails(
+        setDoc(doc(alice, "children/sam/vaultTransactions/v1"), {
+          amount: 1000,
+          type: "DEPOSIT",
+        }),
+      );
+    });
+
+    it("denies creating a vault transaction whose createdAt is a string", async () => {
+      await seedChild("sam", ["alice"]);
+      const alice = env.authenticatedContext("alice").firestore();
+      await assertFails(
+        setDoc(doc(alice, "children/sam/vaultTransactions/v1"), {
+          amount: 1000,
+          type: "DEPOSIT",
+          createdAt: "2025-07-15T09:00:00Z",
+        }),
+      );
+    });
+
+    it("denies creating a vault transaction whose createdAt is a client-chosen Date", async () => {
+      await seedChild("sam", ["alice"]);
+      const alice = env.authenticatedContext("alice").firestore();
+      await assertFails(
+        setDoc(doc(alice, "children/sam/vaultTransactions/v1"), {
+          amount: 1000,
+          type: "DEPOSIT",
+          createdAt: new Date("2020-01-01T00:00:00Z"),
+        }),
+      );
+    });
+
+    it("allows creating a vault transaction with createdAt = serverTimestamp()", async () => {
+      await seedChild("sam", ["alice"]);
+      const alice = env.authenticatedContext("alice").firestore();
+      await assertSucceeds(
+        setDoc(doc(alice, "children/sam/vaultTransactions/v1"), {
+          amount: 1000,
+          type: "DEPOSIT",
+          createdAt: serverTimestamp(),
+        }),
+      );
+    });
+  });
+
+  // ─── createdAt immutability on update ────────────────────────────
+  //
+  // Vault transactions also allow updates (parents can correct a
+  // description, tag a unlock reason, etc.). Pin createdAt so a
+  // fresh write cannot silently bump it.
+  describe("createdAt immutability on update", () => {
+    async function seedVaultTransaction(
+      childId: string,
+      vaultTxnId: string,
+    ): Promise<void> {
+      await env.withSecurityRulesDisabled(async (ctx) => {
+        await setDoc(
+          doc(
+            ctx.firestore(),
+            `children/${childId}/vaultTransactions/${vaultTxnId}`,
+          ),
+          {
+            amount: 1000,
+            type: "DEPOSIT",
+            description: "initial deposit",
+            createdAt: new Date("2025-07-15T09:00:00Z"),
+          },
+        );
+      });
+    }
+
+    it("denies an update that sets createdAt to a different timestamp", async () => {
+      await seedChild("sam", ["alice"]);
+      await seedVaultTransaction("sam", "v1");
+      const alice = env.authenticatedContext("alice").firestore();
+      await assertFails(
+        updateDoc(doc(alice, "children/sam/vaultTransactions/v1"), {
+          createdAt: new Date("2026-01-01T00:00:00Z"),
+        }),
+      );
+    });
+
+    it("denies an update that re-stamps createdAt via serverTimestamp()", async () => {
+      await seedChild("sam", ["alice"]);
+      await seedVaultTransaction("sam", "v1");
+      const alice = env.authenticatedContext("alice").firestore();
+      await assertFails(
+        updateDoc(doc(alice, "children/sam/vaultTransactions/v1"), {
+          createdAt: serverTimestamp(),
+        }),
+      );
+    });
+
+    it("allows a description update that does not touch createdAt", async () => {
+      await seedChild("sam", ["alice"]);
+      await seedVaultTransaction("sam", "v1");
+      const alice = env.authenticatedContext("alice").firestore();
+      await assertSucceeds(
+        updateDoc(doc(alice, "children/sam/vaultTransactions/v1"), {
+          description: "initial deposit (corrected)",
+        }),
+      );
+    });
   });
 });
 

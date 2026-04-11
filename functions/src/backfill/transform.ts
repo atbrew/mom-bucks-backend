@@ -244,12 +244,49 @@ export class BackfillError extends Error {
       | "ORPHAN_VAULT_TXN"
       | "INVALID_AMOUNT"
       | "INVALID_CHILD_DOB"
-      | "INVALID_CHILD_CREATED_AT",
+      | "INVALID_CHILD_CREATED_AT"
+      | "INVALID_TRANSACTION_CREATED_AT"
+      | "INVALID_VAULT_TRANSACTION_CREATED_AT",
     public readonly context: Record<string, unknown> = {},
   ) {
     super(message);
     this.name = "BackfillError";
   }
+}
+
+/**
+ * Runtime guard for a Postgres `created_at` value. `readX()` helpers
+ * in `runBackfill.ts` cast raw rows to their `PgX` types without
+ * runtime validation, so if a misconfigured pg driver or a bad
+ * migration ever surfaced a string, null, or Invalid Date, the cast
+ * would hide it and the Admin SDK would write garbage into Firestore.
+ * Defend here in the pure transforms so the check is unit-testable
+ * without Postgres.
+ *
+ * Note: `new Date("not a date")` is still `instanceof Date`. The
+ * `Number.isNaN(getTime())` check is load-bearing.
+ *
+ * The child `transformChild` validator is intentionally NOT routed
+ * through this helper — it predates this extraction and its
+ * inline-with-comments form is exercised by locked-in tests from
+ * 327e98f; rewiring it would be drive-by churn. New call sites
+ * (transaction + vault transaction) share this helper.
+ */
+function validateCreatedAt(
+  value: unknown,
+  code:
+    | "INVALID_TRANSACTION_CREATED_AT"
+    | "INVALID_VAULT_TRANSACTION_CREATED_AT",
+  context: Record<string, unknown>,
+): Date {
+  if (!(value instanceof Date) || Number.isNaN(value.getTime())) {
+    throw new BackfillError(
+      `invalid created_at: ${String(value)}`,
+      code,
+      { ...context, value },
+    );
+  }
+  return value;
 }
 
 // ─── Helpers ────────────────────────────────────────────────────────
@@ -456,11 +493,16 @@ export function transformTransaction(
       { txnId: row.id, parentId: row.parent_id },
     );
   }
+  const createdAt = validateCreatedAt(
+    row.created_at,
+    "INVALID_TRANSACTION_CREATED_AT",
+    { txnId: row.id },
+  );
   return {
     amount: toCents(row.amount),
     type: row.type,
     description: row.description,
-    createdAt: row.created_at,
+    createdAt,
     createdByUid,
   };
 }
@@ -468,11 +510,16 @@ export function transformTransaction(
 export function transformVaultTransaction(
   row: PgVaultTransaction,
 ): FirestoreVaultTransaction {
+  const createdAt = validateCreatedAt(
+    row.created_at,
+    "INVALID_VAULT_TRANSACTION_CREATED_AT",
+    { vaultTxnId: row.id },
+  );
   return {
     amount: toCents(row.amount),
     type: row.type,
     description: row.description,
-    createdAt: row.created_at,
+    createdAt,
   };
 }
 
