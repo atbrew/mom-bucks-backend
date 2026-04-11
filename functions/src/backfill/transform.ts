@@ -161,6 +161,25 @@ export interface FirestoreChild {
    * time-of-day component.
    */
   dateOfBirth: Date;
+  /**
+   * Instant the child record was created. Required, immutable, and
+   * server-pinned.
+   *
+   *   - On the BACKFILL path, this is carried through verbatim from
+   *     `PgChild.created_at` so the historical creation order
+   *     survives the migration. The Admin SDK bypasses security
+   *     rules, so the backfill is free to write the historical
+   *     timestamp directly.
+   *   - On the CLIENT path (post-cutover), `firestore.rules`
+   *     enforces `createdAt == request.time` via a `serverTimestamp()`
+   *     write. Clients cannot forge or backdate the field.
+   *   - On UPDATE, `firestore.rules` pins it as immutable
+   *     (`createdAtUnchanged()`). A parent cannot re-stamp an old
+   *     child to today and corrupt the historical ordering.
+   *
+   * Mirrors Flask's `Child.created_at` column.
+   */
+  createdAt: Date;
   photoUrl: string | null;
   balance: number; // integer cents
   vaultBalance: number; // integer cents
@@ -224,7 +243,8 @@ export class BackfillError extends Error {
       | "ORPHAN_TRANSACTION"
       | "ORPHAN_VAULT_TXN"
       | "INVALID_AMOUNT"
-      | "INVALID_CHILD_DOB",
+      | "INVALID_CHILD_DOB"
+      | "INVALID_CHILD_CREATED_AT",
     public readonly context: Record<string, unknown> = {},
   ) {
     super(message);
@@ -390,9 +410,29 @@ export function transformChild(
     );
   }
 
+  // Runtime validation of `created_at`.
+  //
+  // Same failure mode as DOB: `readChildren()` casts raw rows to
+  // `PgChild[]` with no runtime validation, so a string, null, or
+  // Invalid Date would slip through and land in Firestore verbatim.
+  // We defend here in the pure transform so the check is
+  // unit-testable without Postgres. The value is load-bearing —
+  // `FirestoreChild.createdAt` is required, immutable, and drives
+  // historical ordering, so garbage in would be particularly
+  // expensive to fix after the fact.
+  const createdAt = row.created_at;
+  if (!(createdAt instanceof Date) || Number.isNaN(createdAt.getTime())) {
+    throw new BackfillError(
+      `child ${row.id} (${row.name}) has invalid created_at: ${String(createdAt)}`,
+      "INVALID_CHILD_CREATED_AT",
+      { childId: row.id, value: createdAt },
+    );
+  }
+
   return {
     name: row.name,
     dateOfBirth: dob,
+    createdAt,
     photoUrl: null,
     balance: toCents(row.balance),
     vaultBalance,

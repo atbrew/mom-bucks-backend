@@ -66,6 +66,20 @@ service cloud.firestore {
                 .hasAny(['dateOfBirth']));
     }
 
+    // True iff an update leaves `createdAt` exactly as it was.
+    // Mirrors `dateOfBirthUnchanged()`: the creation instant is
+    // historical and must never be re-stamped, nulled, or retyped
+    // by a client. Even a `serverTimestamp()` write on UPDATE is
+    // refused here — that would let a parent silently bump an old
+    // child's "createdAt" to today and corrupt the historical
+    // ordering. Clients write `createdAt` exactly once, at create
+    // time, via `serverTimestamp()` — see the `children/{id}`
+    // create rule below.
+    function createdAtUnchanged() {
+      return !(request.resource.data.diff(resource.data).affectedKeys()
+                .hasAny(['createdAt']));
+    }
+
     // ─────────────────────────────────────────────────────────────────
     // users/{uid}
     // ─────────────────────────────────────────────────────────────────
@@ -102,21 +116,39 @@ service cloud.firestore {
       // without one. The field is pinned at the rules layer so
       // neither the Phase 2 backfill nor any future client writer
       // can silently drop it.
+      //
+      // `createdAt` is required and must equal `request.time`.
+      // Clients write it exactly once, at create time, by sending
+      // `serverTimestamp()` — which the server resolves to
+      // `request.time` during rule evaluation. This closes the
+      // door on client-chosen / backdated creation timestamps
+      // (whether from clock drift or deliberate forgery) and
+      // guarantees the historical ordering of new children is
+      // server-authoritative. The Admin-SDK backfill path bypasses
+      // rules and carries the Postgres `created_at` through
+      // verbatim; see `functions/src/backfill/transform.ts`.
+      // On update, `createdAtUnchanged()` (below) refuses any
+      // mutation to the field — including a fresh serverTimestamp()
+      // re-stamp.
       allow create: if isSignedIn()
                     && request.resource.data.parentUids is list
                     && request.resource.data.parentUids.size() == 1
                     && request.resource.data.parentUids[0] == request.auth.uid
-                    && request.resource.data.dateOfBirth is timestamp;
+                    && request.resource.data.dateOfBirth is timestamp
+                    && request.resource.data.createdAt is timestamp
+                    && request.resource.data.createdAt == request.time;
 
       // UPDATE — any current parent can update the child, BUT cannot
-      // directly mutate `parentUids` and cannot touch `dateOfBirth`
-      // (see `dateOfBirthUnchanged()` above for the rationale).
+      // directly mutate `parentUids`, cannot touch `dateOfBirth`, and
+      // cannot touch `createdAt`. See `dateOfBirthUnchanged()` and
+      // `createdAtUnchanged()` above for the rationale.
       // Membership changes go through the acceptInvite (#13) /
       // removeParentFromChildren (#14) callables.
       allow update: if isSignedIn()
                     && request.auth.uid in resource.data.parentUids
                     && parentUidsUnchanged()
-                    && dateOfBirthUnchanged();
+                    && dateOfBirthUnchanged()
+                    && createdAtUnchanged();
 
       // DELETE — any current parent can delete the child.
       //

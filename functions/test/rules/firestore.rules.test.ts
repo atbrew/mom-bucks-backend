@@ -35,7 +35,14 @@ import {
   initializeTestEnvironment,
   RulesTestEnvironment,
 } from "@firebase/rules-unit-testing";
-import { doc, getDoc, setDoc, updateDoc, deleteDoc } from "firebase/firestore";
+import {
+  doc,
+  getDoc,
+  setDoc,
+  updateDoc,
+  deleteDoc,
+  serverTimestamp,
+} from "firebase/firestore";
 
 // Resolve the rules file from the repo root. Test file lives at
 // functions/test/rules/firestore.rules.test.ts; firestore.rules is at
@@ -79,6 +86,14 @@ beforeEach(async () => {
 // the `extra` argument.
 const DEFAULT_SEED_DOB = new Date("2018-05-01T00:00:00Z");
 
+// Default createdAt for seeded children. Mirrors DEFAULT_SEED_DOB:
+// real children always carry a `createdAt` (enforced at create-time
+// by rules, which pin it to `request.time`), so seeding must supply
+// one too — otherwise the update-time `createdAtUnchanged()` guards
+// below have nothing to compare against and the rule becomes
+// inadvertently lax.
+const DEFAULT_SEED_CREATED_AT = new Date("2025-01-01T09:30:00Z");
+
 async function seedChild(
   childId: string,
   parentUids: string[],
@@ -89,6 +104,7 @@ async function seedChild(
     await setDoc(doc(db, "children", childId), {
       name: childId,
       dateOfBirth: DEFAULT_SEED_DOB,
+      createdAt: DEFAULT_SEED_CREATED_AT,
       balance: 0,
       vaultBalance: 0,
       parentUids,
@@ -187,6 +203,7 @@ describe("children/{childId}", () => {
         setDoc(doc(alice, "children/sam"), {
           name: "Sam",
           dateOfBirth: SAM_DOB,
+          createdAt: serverTimestamp(),
           balance: 0,
           vaultBalance: 0,
           parentUids: ["alice"],
@@ -202,6 +219,7 @@ describe("children/{childId}", () => {
         setDoc(doc(alice, "children/sam"), {
           name: "Sam",
           dateOfBirth: SAM_DOB,
+          createdAt: serverTimestamp(),
           balance: 0,
           vaultBalance: 0,
           parentUids: ["bob"],
@@ -217,6 +235,7 @@ describe("children/{childId}", () => {
         setDoc(doc(alice, "children/sam"), {
           name: "Sam",
           dateOfBirth: SAM_DOB,
+          createdAt: serverTimestamp(),
           balance: 0,
           vaultBalance: 0,
           parentUids: [],
@@ -235,6 +254,7 @@ describe("children/{childId}", () => {
         setDoc(doc(alice, "children/sam"), {
           name: "Sam",
           dateOfBirth: SAM_DOB,
+          createdAt: serverTimestamp(),
           balance: 0,
           vaultBalance: 0,
           parentUids: ["alice", "bob"],
@@ -250,6 +270,7 @@ describe("children/{childId}", () => {
         setDoc(doc(anon, "children/sam"), {
           name: "Sam",
           dateOfBirth: SAM_DOB,
+          createdAt: serverTimestamp(),
           balance: 0,
           vaultBalance: 0,
           parentUids: ["alice"],
@@ -272,6 +293,7 @@ describe("children/{childId}", () => {
         await assertFails(
           setDoc(doc(alice, "children/sam"), {
             name: "Sam",
+            createdAt: serverTimestamp(),
             balance: 0,
             vaultBalance: 0,
             parentUids: ["alice"],
@@ -289,6 +311,7 @@ describe("children/{childId}", () => {
           setDoc(doc(alice, "children/sam"), {
             name: "Sam",
             dateOfBirth: "2018-05-01",
+            createdAt: serverTimestamp(),
             balance: 0,
             vaultBalance: 0,
             parentUids: ["alice"],
@@ -304,6 +327,94 @@ describe("children/{childId}", () => {
           setDoc(doc(alice, "children/sam"), {
             name: "Sam",
             dateOfBirth: SAM_DOB,
+            createdAt: serverTimestamp(),
+            balance: 0,
+            vaultBalance: 0,
+            parentUids: ["alice"],
+            createdByUid: "alice",
+            version: 1,
+          }),
+        );
+      });
+    });
+
+    // ─── createdAt required + bound to request.time ───────────────
+    //
+    // Reversing PR #32's pushback on Gemini's `createdAt` comments.
+    // A required, server-timestamped, immutable createdAt is the
+    // strongest data model at this stage. Rules must:
+    //
+    //   1. Reject creates with no `createdAt` at all.
+    //   2. Reject creates whose `createdAt` is a string or other
+    //      non-timestamp.
+    //   3. Reject creates whose `createdAt` is a client-chosen
+    //      timestamp (e.g. `new Date()` from a drifting clock or a
+    //      deliberately-backdated "imported" record). The only way
+    //      to pass the create rule is to write `request.time` via
+    //      `serverTimestamp()`, which the emulator binds to
+    //      `request.time` during rule evaluation.
+    //
+    // Immutability on update is covered in the "createdAt immutability
+    // on update" describe block below.
+    describe("createdAt required and bound to request.time on create", () => {
+      it("denies creating a child with no createdAt field at all", async () => {
+        const alice = env.authenticatedContext("alice").firestore();
+        await assertFails(
+          setDoc(doc(alice, "children/sam"), {
+            name: "Sam",
+            dateOfBirth: SAM_DOB,
+            balance: 0,
+            vaultBalance: 0,
+            parentUids: ["alice"],
+            createdByUid: "alice",
+            version: 1,
+          }),
+        );
+      });
+
+      it("denies creating a child whose createdAt is not a timestamp (e.g. a string)", async () => {
+        const alice = env.authenticatedContext("alice").firestore();
+        await assertFails(
+          setDoc(doc(alice, "children/sam"), {
+            name: "Sam",
+            dateOfBirth: SAM_DOB,
+            createdAt: "2025-01-01T09:30:00Z",
+            balance: 0,
+            vaultBalance: 0,
+            parentUids: ["alice"],
+            createdByUid: "alice",
+            version: 1,
+          }),
+        );
+      });
+
+      it("denies creating a child whose createdAt is a client-chosen Date (not serverTimestamp)", async () => {
+        // A client-chosen `new Date()` will not equal `request.time`
+        // during rule evaluation (different instant, different drift).
+        // This test pins the "server time only" invariant: the only
+        // way to pass is via `serverTimestamp()`.
+        const alice = env.authenticatedContext("alice").firestore();
+        await assertFails(
+          setDoc(doc(alice, "children/sam"), {
+            name: "Sam",
+            dateOfBirth: SAM_DOB,
+            createdAt: new Date("2020-01-01T00:00:00Z"),
+            balance: 0,
+            vaultBalance: 0,
+            parentUids: ["alice"],
+            createdByUid: "alice",
+            version: 1,
+          }),
+        );
+      });
+
+      it("allows creating a child with createdAt = serverTimestamp() (which rules see as request.time)", async () => {
+        const alice = env.authenticatedContext("alice").firestore();
+        await assertSucceeds(
+          setDoc(doc(alice, "children/sam"), {
+            name: "Sam",
+            dateOfBirth: SAM_DOB,
+            createdAt: serverTimestamp(),
             balance: 0,
             vaultBalance: 0,
             parentUids: ["alice"],
@@ -400,6 +511,68 @@ describe("children/{childId}", () => {
         // Regression guard: the update rule must not become so strict
         // that ordinary field updates (rename, balance bumps, etc.)
         // get denied just because DOB is in the doc.
+        await seedChild("sam", ["alice"]);
+        const alice = env.authenticatedContext("alice").firestore();
+        await assertSucceeds(
+          updateDoc(doc(alice, "children/sam"), { name: "Samuel" }),
+        );
+      });
+    });
+
+    // ─── createdAt is immutable after create ─────────────────────
+    //
+    // Mirrors the dateOfBirth immutability block above. A child's
+    // creation instant is historical — it cannot legitimately change
+    // post-create, so any update that touches `createdAt` (to
+    // overwrite, null out, or retype it) must be refused.
+    describe("createdAt immutability on update", () => {
+      it("denies an update that sets createdAt to a different timestamp", async () => {
+        await seedChild("sam", ["alice"]);
+        const alice = env.authenticatedContext("alice").firestore();
+        await assertFails(
+          updateDoc(doc(alice, "children/sam"), {
+            createdAt: new Date("2025-02-02T10:00:00Z"),
+          }),
+        );
+      });
+
+      it("denies an update that sets createdAt to serverTimestamp() (re-stamping)", async () => {
+        // Even serverTimestamp() — which is the only legitimate way to
+        // write `createdAt` on CREATE — must be refused on UPDATE.
+        // Otherwise a parent could silently bump an old child's
+        // "createdAt" to today and corrupt the historical ordering.
+        await seedChild("sam", ["alice"]);
+        const alice = env.authenticatedContext("alice").firestore();
+        await assertFails(
+          updateDoc(doc(alice, "children/sam"), {
+            createdAt: serverTimestamp(),
+          }),
+        );
+      });
+
+      it("denies an update that removes createdAt (null write)", async () => {
+        await seedChild("sam", ["alice"]);
+        const alice = env.authenticatedContext("alice").firestore();
+        await assertFails(
+          updateDoc(doc(alice, "children/sam"), {
+            createdAt: null,
+          }),
+        );
+      });
+
+      it("denies an update that sets createdAt to a non-timestamp (e.g. a string)", async () => {
+        await seedChild("sam", ["alice"]);
+        const alice = env.authenticatedContext("alice").firestore();
+        await assertFails(
+          updateDoc(doc(alice, "children/sam"), {
+            createdAt: "2025-02-02T10:00:00Z",
+          }),
+        );
+      });
+
+      it("allows a name update that does not touch createdAt", async () => {
+        // Regression guard: ordinary field updates must still go
+        // through even though createdAt is now pinned.
         await seedChild("sam", ["alice"]);
         const alice = env.authenticatedContext("alice").firestore();
         await assertSucceeds(

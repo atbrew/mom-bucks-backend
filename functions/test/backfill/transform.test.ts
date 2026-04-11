@@ -346,6 +346,8 @@ describe("transformUser", () => {
 // ─── transformChild ─────────────────────────────────────────────────
 
 describe("transformChild", () => {
+  const CHILD_CREATED_AT = new Date("2025-01-01T09:30:00Z");
+
   const childRow: PgChild = {
     id: "c-sam",
     parent_id: "u-alice",
@@ -354,7 +356,7 @@ describe("transformChild", () => {
     balance: "12.50",
     profile_image_key: null,
     version: 3,
-    created_at: new Date(),
+    created_at: CHILD_CREATED_AT,
     updated_at: new Date(),
   };
 
@@ -454,6 +456,64 @@ describe("transformChild", () => {
     } catch (err) {
       expect(err).toBeInstanceOf(BackfillError);
       expect((err as BackfillError).code).toBe("INVALID_CHILD_DOB");
+    }
+  });
+
+  // ─── createdAt carry-through + runtime validation ────────────────
+  //
+  // Reversing PR #32's pushback on Gemini's `createdAt` comments
+  // (3-6). At this stage of the project there's no backfill cost and
+  // the strongest data model is the one that enforces `createdAt`
+  // server-side from day one: required on `FirestoreChild`, immutable
+  // once set, validated at transform time the same way DOB is. The
+  // Postgres source already carries `created_at` (it has since the
+  // Flask days) so the historical creation-order survives the move.
+  it("preserves created_at from PgChild as FirestoreChild.createdAt", () => {
+    const out = transformChild(
+      childRow,
+      ["fb-alice"],
+      "fb-alice",
+      null,
+      0,
+    );
+    expect(out.createdAt).toEqual(CHILD_CREATED_AT);
+  });
+
+  it("throws INVALID_CHILD_CREATED_AT when created_at is a string instead of a Date", () => {
+    const bad = {
+      ...childRow,
+      created_at: "2025-01-01T09:30:00Z" as unknown as Date,
+    };
+    try {
+      transformChild(bad, ["fb-alice"], "fb-alice", null, 0);
+      throw new Error("should have thrown");
+    } catch (err) {
+      expect(err).toBeInstanceOf(BackfillError);
+      expect((err as BackfillError).code).toBe("INVALID_CHILD_CREATED_AT");
+    }
+  });
+
+  it("throws INVALID_CHILD_CREATED_AT when created_at is null", () => {
+    const bad = { ...childRow, created_at: null as unknown as Date };
+    try {
+      transformChild(bad, ["fb-alice"], "fb-alice", null, 0);
+      throw new Error("should have thrown");
+    } catch (err) {
+      expect(err).toBeInstanceOf(BackfillError);
+      expect((err as BackfillError).code).toBe("INVALID_CHILD_CREATED_AT");
+    }
+  });
+
+  it("throws INVALID_CHILD_CREATED_AT when created_at is an Invalid Date", () => {
+    // Same `new Date("not a date")` trap as DOB — the validator has
+    // to inspect .getTime() because Invalid Dates are still Dates.
+    const bad = { ...childRow, created_at: new Date("not a date") };
+    try {
+      transformChild(bad, ["fb-alice"], "fb-alice", null, 0);
+      throw new Error("should have thrown");
+    } catch (err) {
+      expect(err).toBeInstanceOf(BackfillError);
+      expect((err as BackfillError).code).toBe("INVALID_CHILD_CREATED_AT");
     }
   });
 });
