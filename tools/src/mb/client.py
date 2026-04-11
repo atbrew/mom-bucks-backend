@@ -101,6 +101,11 @@ class AuthError(RuntimeError):
     """Raised when Firebase Auth returns an error."""
 
 
+class FirestoreError(RuntimeError):
+    """Raised when a Firestore REST call returns an error, with the
+    response body attached so rule-denial reasons are visible."""
+
+
 def sign_in(api_key: str | ProjectConfig, email: str, password: str) -> dict:
     """Sign in via Firebase Auth REST API, return the full response.
 
@@ -284,13 +289,16 @@ class FirestoreClient:
                         }
                         for f in server_time_fields
                     ],
-                    "currentDocument": {"exists": False},
                 }
             ]
         }
         url = f"{self.config.firestore_url}:commit"
         resp = requests.post(url, headers=self._headers, json=body)
-        resp.raise_for_status()
+        if resp.status_code >= 400:
+            raise FirestoreError(
+                f"commit failed ({resp.status_code}) for "
+                f"{full_path}: {resp.text}"
+            )
         return doc_id
 
     def update_doc(self, path: str, fields: dict[str, Any]) -> None:
