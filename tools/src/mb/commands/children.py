@@ -2,11 +2,13 @@
 
 from __future__ import annotations
 
+from datetime import datetime, timezone
+
 import click
 from rich.console import Console
 from rich.table import Table
 
-from ..client import FirestoreClient, ProjectConfig, make_timestamp, sign_in
+from ..client import FirestoreClient, ProjectConfig, sign_in
 
 console = Console()
 
@@ -36,23 +38,39 @@ def children_group(ctx: click.Context, email: str, password: str) -> None:
 
 @children_group.command("create")
 @click.option("--name", required=True, help="Child name.")
+@click.option(
+    "--dob",
+    "dob",
+    required=True,
+    type=click.DateTime(["%Y-%m-%d"]),
+    help="Date of birth (YYYY-MM-DD).",
+)
 @click.pass_context
-def create_child(ctx: click.Context, name: str) -> None:
+def create_child(ctx: click.Context, name: str, dob: datetime) -> None:
     """Create a new child."""
     client = _get_client(ctx)
-    child_id = client.create_doc("children", {
-        "name": name,
-        "parentUids": [client.uid],
-        "balance": 0,
-        "vaultBalance": 0,
-        "createdByUid": client.uid,
-        "version": 0,
-        "lastTxnAt": None,
-        "deletedAt": None,
-        "activeCardId": None,
-        "photoUrl": None,
-    })
-    console.print(f"[green]Created child:[/green] {name} (ID: {child_id})")
+    dob_utc = dob.replace(tzinfo=timezone.utc)
+    child_id = client.create_doc_with_server_time(
+        "children",
+        {
+            "name": name,
+            "parentUids": [client.uid],
+            "dateOfBirth": dob_utc,
+            "balance": 0,
+            "vaultBalance": 0,
+            "createdByUid": client.uid,
+            "version": 0,
+            "lastTxnAt": None,
+            "deletedAt": None,
+            "activeCardId": None,
+            "photoUrl": None,
+        },
+        server_time_fields=["createdAt"],
+    )
+    console.print(
+        f"[green]Created child:[/green] {name} "
+        f"(DOB {dob_utc.date().isoformat()}, ID: {child_id})"
+    )
 
 
 @children_group.command("list")

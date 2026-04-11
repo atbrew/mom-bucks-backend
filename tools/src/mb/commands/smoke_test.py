@@ -4,12 +4,13 @@ from __future__ import annotations
 
 import os
 import uuid
+from datetime import datetime, timezone
 
 import click
 from rich.console import Console
 
 from ..admin import AdminClient
-from ..client import FirestoreClient, ProjectConfig, make_timestamp, sign_in
+from ..client import FirestoreClient, ProjectConfig, sign_in
 
 console = Console()
 
@@ -58,30 +59,39 @@ def smoke_test(ctx: click.Context) -> None:
         # ── 4. Create child (Firestore REST → exercises rules) ───
         console.print("\n[bold]4/7[/bold] Creating child…")
         child_name = f"Smoke Child {uuid.uuid4().hex[:6]}"
-        child_id = client.create_doc("children", {
-            "name": child_name,
-            "parentUids": [uid],
-            "balance": 0,
-            "vaultBalance": 0,
-            "createdByUid": uid,
-            "version": 0,
-            "lastTxnAt": None,
-            "deletedAt": None,
-            "activeCardId": None,
-            "photoUrl": None,
-        })
+        dob = datetime(2020, 1, 1, tzinfo=timezone.utc)
+        child_id = client.create_doc_with_server_time(
+            "children",
+            {
+                "name": child_name,
+                "parentUids": [uid],
+                "dateOfBirth": dob,
+                "balance": 0,
+                "vaultBalance": 0,
+                "createdByUid": uid,
+                "version": 0,
+                "lastTxnAt": None,
+                "deletedAt": None,
+                "activeCardId": None,
+                "photoUrl": None,
+            },
+            server_time_fields=["createdAt"],
+        )
         admin.track_doc(f"children/{child_id}")
         console.print(f"  [green]OK[/green] childId={child_id}")
 
         # ── 5. Create LODGE transaction ──────────────────────────
         console.print("\n[bold]5/7[/bold] Creating LODGE transaction (€5.00)…")
-        txn_id = client.create_doc(f"children/{child_id}/transactions", {
-            "amount": 500,
-            "type": "LODGE",
-            "description": "Smoke test deposit",
-            "createdAt": make_timestamp(),
-            "createdByUid": uid,
-        })
+        txn_id = client.create_doc_with_server_time(
+            f"children/{child_id}/transactions",
+            {
+                "amount": 500,
+                "type": "LODGE",
+                "description": "Smoke test deposit",
+                "createdByUid": uid,
+            },
+            server_time_fields=["createdAt"],
+        )
         admin.track_doc(f"children/{child_id}/transactions/{txn_id}")
         console.print(f"  [green]OK[/green] txnId={txn_id}")
 

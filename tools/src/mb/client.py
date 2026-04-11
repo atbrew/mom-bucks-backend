@@ -13,12 +13,29 @@ Admin SDK surface (user creation + cleanup only).
 from __future__ import annotations
 
 import os
+import secrets
 import time
 from dataclasses import dataclass
 from datetime import datetime, timezone
 from typing import Any
 
 import requests
+
+
+# Firestore autoid alphabet — matches the official SDK: 20 chars from
+# [A-Za-z0-9]. Used when we pre-generate a document ID client-side so we
+# can POST to the commit endpoint (which requires an absolute doc name)
+# instead of the collection-create endpoint.
+_AUTOID_ALPHABET = (
+    "ABCDEFGHIJKLMNOPQRSTUVWXYZ"
+    "abcdefghijklmnopqrstuvwxyz"
+    "0123456789"
+)
+
+
+def _generate_doc_id() -> str:
+    """Generate a 20-char Firestore-style document ID."""
+    return "".join(secrets.choice(_AUTOID_ALPHABET) for _ in range(20))
 
 
 # ─── Project configuration ─────────────────────────────────────────
@@ -222,6 +239,59 @@ class FirestoreClient:
         # Document name is like "projects/.../documents/children/abc123"
         name = resp.json()["name"]
         return name.split("/")[-1]
+
+    def create_doc_with_server_time(
+        self,
+        collection_path: str,
+        fields: dict[str, Any],
+        server_time_fields: list[str],
+        doc_id: str | None = None,
+    ) -> str:
+        """Create a document via the commit endpoint with DocumentTransforms.
+
+        Fields listed in ``server_time_fields`` are stamped by Firestore
+        itself with ``request.time``. This is the only REST path that can
+        satisfy security rules of the form
+        ``request.resource.data.createdAt == request.time`` — the plain
+        ``createDocument`` endpoint has no sentinel support.
+
+        Pass the server-time field names in ``server_time_fields`` and
+        omit them from ``fields``. A doc ID is generated client-side if
+        not provided (commit requires an absolute document name).
+        Returns the document ID.
+        """
+        if doc_id is None:
+            doc_id = _generate_doc_id()
+        full_path = f"{collection_path}/{doc_id}"
+        doc_name = (
+            f"projects/{self.config.project_id}"
+            f"/databases/(default)/documents/{full_path}"
+        )
+        body = {
+            "writes": [
+                {
+                    "update": {
+                        "name": doc_name,
+                        "fields": {
+                            k: to_firestore_value(v)
+                            for k, v in fields.items()
+                        },
+                    },
+                    "updateTransforms": [
+                        {
+                            "fieldPath": f,
+                            "setToServerValue": "REQUEST_TIME",
+                        }
+                        for f in server_time_fields
+                    ],
+                    "currentDocument": {"exists": False},
+                }
+            ]
+        }
+        url = f"{self.config.firestore_url}:commit"
+        resp = requests.post(url, headers=self._headers, json=body)
+        resp.raise_for_status()
+        return doc_id
 
     def update_doc(self, path: str, fields: dict[str, Any]) -> None:
         """Update specific fields on a document."""

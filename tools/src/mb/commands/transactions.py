@@ -5,7 +5,7 @@ from __future__ import annotations
 import click
 from rich.console import Console
 
-from ..client import FirestoreClient, ProjectConfig, make_timestamp, sign_in
+from ..client import FirestoreClient, ProjectConfig, sign_in
 
 console = Console()
 
@@ -50,13 +50,16 @@ def add_transaction(
     """Add a transaction to a child."""
     client = _get_client(ctx)
     amount_cents = round(amount * 100)
-    txn_id = client.create_doc(f"children/{child_id}/transactions", {
-        "amount": amount_cents,
-        "type": txn_type,
-        "description": description,
-        "createdAt": make_timestamp(),
-        "createdByUid": client.uid,
-    })
+    txn_id = client.create_doc_with_server_time(
+        f"children/{child_id}/transactions",
+        {
+            "amount": amount_cents,
+            "type": txn_type,
+            "description": description,
+            "createdByUid": client.uid,
+        },
+        server_time_fields=["createdAt"],
+    )
     console.print(
         f"[green]Created {txn_type}:[/green] \u20ac{amount:.2f} "
         f"({amount_cents} cents) → {txn_id}"
