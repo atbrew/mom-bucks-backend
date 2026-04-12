@@ -1,0 +1,89 @@
+name: Deploy Dev
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - "functions/**"
+      - "firestore.rules"
+      - "storage.rules"
+      - "firestore.indexes.json"
+      - ".github/workflows/**"
+      - "tools/**"
+
+concurrency:
+  group: deploy-dev
+  cancel-in-progress: true
+
+jobs:
+  gate:
+    uses: ./.github/workflows/firebase-ci.yml
+    secrets: inherit
+
+  deploy:
+    name: Deploy to Dev
+    needs: gate
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "22"
+          cache: npm
+          cache-dependency-path: functions/package-lock.json
+
+      - name: Install dependencies and build
+        working-directory: functions
+        run: npm ci
+
+      - name: Build functions
+        working-directory: functions
+        run: npm run build
+
+      - name: Write dev index.html
+        run: |
+          cat > public/index.html << 'DEVHTML'
+          <!doctype html>
+          <html lang="en">
+            <head>
+              <meta charset="utf-8" />
+              <meta name="viewport" content="width=device-width, initial-scale=1" />
+              <title>Mom Bucks Dev</title>
+            </head>
+            <body><h1>Mom Bucks Dev</h1><p>Dev environment — mom-bucks-dev-b3772</p></body>
+          </html>
+          DEVHTML
+
+      - name: Write service account key
+        run: echo '${{ secrets.FIREBASE_SA_KEY_DEV }}' > /tmp/sa-key.json
+
+      - name: Install firebase-tools
+        run: npm install -g firebase-tools
+
+      - name: Deploy to Firebase
+        env:
+          GOOGLE_APPLICATION_CREDENTIALS: /tmp/sa-key.json
+        run: >
+          firebase deploy
+          --project mom-bucks-dev-b3772
+          --only functions,firestore:rules,firestore:indexes,storage,hosting
+          --non-interactive
+          --force
+
+      - name: Install uv
+        uses: astral-sh/setup-uv@v4
+
+      - name: Run smoke test
+        working-directory: tools
+        env:
+          FIREBASE_WEB_API_KEY_DEV: ${{ secrets.FIREBASE_WEB_API_KEY_DEV }}
+          GOOGLE_APPLICATION_CREDENTIALS: /tmp/sa-key.json
+        run: |
+          uv sync
+          uv run mb smoke-test
+
+      - name: Clean up service account key
+        if: always()
+        run: rm -f /tmp/sa-key.json

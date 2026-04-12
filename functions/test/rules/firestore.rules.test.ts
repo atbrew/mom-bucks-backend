@@ -505,27 +505,26 @@ describe("children/{childId}", () => {
       );
     });
 
-    // ─── dateOfBirth is immutable after create ───────────────────
+    // ─── dateOfBirth is editable on update ───────────────────────
     //
-    // The reviewers on PR #32 flagged that enforcing `dateOfBirth`
-    // only on create is a hollow guarantee: a signed-in parent could
-    // then update the child doc, strip the field, or change it to a
-    // different value, and the "required" invariant would silently
-    // rot. Biologically DOB doesn't change, so the simplest fix is
-    // to pin it as immutable at the rules layer. These tests lock in
-    // that behaviour.
-    describe("dateOfBirth immutability on update", () => {
-      it("denies an update that sets dateOfBirth to a different timestamp", async () => {
+    // DOB is a product-level editable field: typos at create time
+    // are common enough that the app needs to let parents correct
+    // them. The update rule allows mutations but pins
+    // `request.resource.data.dateOfBirth is timestamp` so the
+    // "required + typed" invariant can't be silently rotted by
+    // stripping the field or writing a non-timestamp.
+    describe("dateOfBirth editability on update", () => {
+      it("allows an update that sets dateOfBirth to a different timestamp", async () => {
         await seedChild("sam", ["alice"]);
         const alice = env.authenticatedContext("alice").firestore();
-        await assertFails(
+        await assertSucceeds(
           updateDoc(doc(alice, "children/sam"), {
             dateOfBirth: new Date("2019-06-01T00:00:00Z"),
           }),
         );
       });
 
-      it("denies an update that removes dateOfBirth (FieldValue.delete equivalent)", async () => {
+      it("denies an update that removes dateOfBirth (null write)", async () => {
         // The Firestore web SDK uses `deleteField()` from
         // firebase/firestore, but re-exporting it would widen the
         // test's import surface. A `null` write is functionally the
@@ -627,7 +626,7 @@ describe("children/{childId}", () => {
 
     // ─── createdByUid is immutable after create ──────────────────
     //
-    // Mirrors `dateOfBirthUnchanged()` / `createdAtUnchanged()`.
+    // Mirrors `createdAtUnchanged()`.
     // `createdByUid` is an audit-only field — the identity of the
     // original creator must never be overwritten. Without this
     // guard a parent could silently rewrite history and pin a child

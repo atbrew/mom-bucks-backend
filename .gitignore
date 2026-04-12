@@ -29,6 +29,13 @@ serviceAccount*.json
 .DS_Store
 Thumbs.db
 
+# Python (tools/)
+__pycache__/
+*.pyc
+.venv/
+*.egg-info/
+dist/
+
 # Editors
 .idea/
 .vscode/
