@@ -153,7 +153,7 @@ def to_firestore_value(val: Any) -> dict:
     if isinstance(val, str):
         return {"stringValue": val}
     if isinstance(val, datetime):
-        return {"timestampValue": val.isoformat()}
+        return {"timestampValue": val.strftime("%Y-%m-%dT%H:%M:%S.%fZ")}
     if isinstance(val, list):
         return {
             "arrayValue": {
@@ -184,7 +184,8 @@ def from_firestore_value(val: dict) -> Any:
     if "stringValue" in val:
         return val["stringValue"]
     if "timestampValue" in val:
-        return val["timestampValue"]
+        raw = val["timestampValue"]
+        return datetime.fromisoformat(raw.replace("Z", "+00:00"))
     if "arrayValue" in val:
         values = val["arrayValue"].get("values", [])
         return [from_firestore_value(v) for v in values]
@@ -320,6 +321,19 @@ class FirestoreClient:
         if resp.status_code == 404:
             return
         resp.raise_for_status()
+
+    def list_collection(self, path: str) -> list[dict]:
+        """List all documents in a collection. Returns decoded docs."""
+        url = f"{self.config.firestore_url}/{path}"
+        resp = requests.get(url, headers=self._headers)
+        resp.raise_for_status()
+        results = []
+        for doc in resp.json().get("documents", []):
+            doc_id = doc["name"].split("/")[-1]
+            fields = from_firestore_doc(doc)
+            fields["_id"] = doc_id
+            results.append(fields)
+        return results
 
     def query(
         self,

@@ -72,14 +72,8 @@ def create_activity(
 def list_activities(ctx: click.Context, child_id: str) -> None:
     """List activities for a child."""
     client = _get_client(ctx)
-    # Read the subcollection via a direct GET on the collection
-    url = f"{client.config.firestore_url}/children/{child_id}/activities"
-    import requests as req
-    resp = req.get(url, headers=client._headers)
-    resp.raise_for_status()
-    data = resp.json()
-    docs = data.get("documents", [])
-    if not docs:
+    activities = client.list_collection(f"children/{child_id}/activities")
+    if not activities:
         console.print("[dim]No activities found.[/dim]")
         return
     table = Table(title="Activities")
@@ -87,16 +81,13 @@ def list_activities(ctx: click.Context, child_id: str) -> None:
     table.add_column("Title")
     table.add_column("Reward")
     table.add_column("Status")
-    for doc in docs:
-        from ..client import from_firestore_doc
-        fields = from_firestore_doc(doc)
-        doc_id = doc["name"].split("/")[-1]
-        reward_cents = fields.get("reward", 0)
+    for act in activities:
+        reward_cents = act.get("reward", 0)
         table.add_row(
-            doc_id,
-            fields.get("title", "?"),
+            act.get("_id", "?"),
+            act.get("title", "?"),
             f"\u20ac{reward_cents / 100:.2f}",
-            fields.get("status", "?"),
+            act.get("status", "?"),
         )
     console.print(table)
 

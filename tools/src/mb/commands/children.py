@@ -131,7 +131,12 @@ def list_children(ctx: click.Context) -> None:
     for child in children:
         balance_cents = child.get("balance", 0)
         dob_raw = child.get("dateOfBirth")
-        dob_display = dob_raw[:10] if isinstance(dob_raw, str) else "—"
+        if isinstance(dob_raw, datetime):
+            dob_display = dob_raw.strftime("%Y-%m-%d")
+        elif isinstance(dob_raw, str):
+            dob_display = dob_raw[:10]
+        else:
+            dob_display = "—"
         photo = child.get("photoUrl") or "—"
         parents = child.get("parentUids") or []
         parents_display = ", ".join(parents) if parents else "—"
