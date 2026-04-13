@@ -122,17 +122,23 @@ def revert_transaction(ctx: click.Context, child_id: str, txn_id: str) -> None:
     revert_txn_id = result.get("revertTxnId", "?")
     console.print(f"[green]Reverted:[/green] {txn_id} \u2192 {revert_txn_id}")
     original = client.get_doc(f"children/{child_id}/transactions/{txn_id}")
-    original_type = (original or {}).get("type", "")
-    amount_cents = (original or {}).get("amount", 0)
-    inverse_type = "WITHDRAW" if original_type == "LODGE" else "LODGE"
-    expected = balance_before + (amount_cents if inverse_type == "LODGE" else -amount_cents)
-    try:
-        after = client.poll_doc_field(
-            f"children/{child_id}", "balance", expected,
-            timeout_s=10, interval_s=2,
-        )
-        balance_after = after["balance"]
-    except TimeoutError:
+    if original and isinstance(original.get("amount"), (int, float)):
+        original_type = original.get("type", "")
+        amount_cents = original["amount"]
+        inverse_type = "WITHDRAW" if original_type == "LODGE" else "LODGE"
+        expected = balance_before + (amount_cents if inverse_type == "LODGE" else -amount_cents)
+        try:
+            after = client.poll_doc_field(
+                f"children/{child_id}", "balance", expected,
+                timeout_s=10, interval_s=2,
+            )
+            balance_after = after["balance"]
+        except TimeoutError:
+            after_doc = client.get_doc(f"children/{child_id}")
+            balance_after = (after_doc or {}).get("balance", balance_before)
+    else:
+        import time
+        time.sleep(3)
         after_doc = client.get_doc(f"children/{child_id}")
         balance_after = (after_doc or {}).get("balance", balance_before)
     console.print(
