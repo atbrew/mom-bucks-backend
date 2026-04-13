@@ -61,7 +61,7 @@ describe("decideRevert", () => {
         kind: "revert",
         inverseType: "WITHDRAW",
         amount: 100,
-        description: "Revert of ",
+        description: "Revert",
       });
     });
   });
@@ -130,6 +130,19 @@ describe("decideRevert", () => {
         kind: "reject",
         code: "failed-precondition",
         message: "unknown transaction type: REFUND",
+      });
+    });
+
+    it("rejects when transaction amount is invalid", () => {
+      const decision = decideRevert({
+        callerUid: CALLER,
+        txn: { amount: -50, type: "LODGE" },
+        child: { ...VALID_CHILD },
+      });
+      expect(decision).toEqual({
+        kind: "reject",
+        code: "failed-precondition",
+        message: "invalid transaction amount: -50",
       });
     });
   });

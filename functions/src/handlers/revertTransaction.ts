@@ -28,6 +28,8 @@ interface TransactionDoc {
   description?: string;
   createdByUid?: string;
   revertedByTxnId?: string;
+  revertsTransactionId?: string;
+  createdAt?: FirebaseFirestore.Timestamp;
 }
 
 interface ChildDoc {
@@ -72,6 +74,14 @@ export function decideRevert(params: {
   if (txn.type !== "LODGE" && txn.type !== "WITHDRAW") {
     return { kind: "reject", code: "failed-precondition", message: `unknown transaction type: ${txn.type}` };
   }
+  if (
+    typeof txn.amount !== "number" ||
+    !Number.isFinite(txn.amount) ||
+    txn.amount < 0 ||
+    !Number.isInteger(txn.amount)
+  ) {
+    return { kind: "reject", code: "failed-precondition", message: `invalid transaction amount: ${txn.amount}` };
+  }
 
   const inverseType = txn.type === "LODGE" ? "WITHDRAW" : "LODGE";
   const originalDesc = txn.description ?? "";
@@ -80,7 +90,7 @@ export function decideRevert(params: {
     kind: "revert",
     inverseType,
     amount: txn.amount,
-    description: `Revert of ${originalDesc}`,
+    description: originalDesc ? `Revert of ${originalDesc}` : "Revert",
   };
 }
 
