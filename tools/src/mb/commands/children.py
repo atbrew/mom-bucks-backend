@@ -73,6 +73,37 @@ def create_child(ctx: click.Context, name: str, dob: datetime) -> None:
     )
 
 
+def _format_dob(dob_raw: object) -> str:
+    if isinstance(dob_raw, datetime):
+        return dob_raw.strftime("%Y-%m-%d")
+    if isinstance(dob_raw, str):
+        return dob_raw[:10]
+    return "—"
+
+
+def _child_table(title: str, child_id: str, child: dict) -> Table:
+    table = Table(title=title)
+    table.add_column("ID", overflow="fold")
+    table.add_column("Name")
+    table.add_column("DOB")
+    table.add_column("Photo", overflow="fold")
+    table.add_column("Parents", overflow="fold")
+    table.add_column("Balance", justify="right")
+    balance_cents = child.get("balance", 0)
+    photo = child.get("photoUrl") or "—"
+    parents = child.get("parentUids") or []
+    parents_display = ", ".join(parents) if parents else "—"
+    table.add_row(
+        child_id,
+        child.get("name", "?"),
+        _format_dob(child.get("dateOfBirth")),
+        photo,
+        parents_display,
+        f"\u20ac{balance_cents / 100:.2f}",
+    )
+    return table
+
+
 @children_group.command("update")
 @click.option("--child-id", required=True, help="Child document ID.")
 @click.option("--name", default=None, help="New display name.")
@@ -94,20 +125,19 @@ def update_child(
     if name is None and dob is None:
         raise click.UsageError("Pass at least one of --name, --dob.")
     client = _get_client(ctx)
+    before = client.get_doc(f"children/{child_id}")
+    if not before:
+        console.print(f"[red]Child {child_id} not found.[/red]")
+        raise SystemExit(1)
+    console.print(_child_table("Before", child_id, before))
     fields: dict = {}
     if name is not None:
         fields["name"] = name
     if dob is not None:
         fields["dateOfBirth"] = dob.replace(tzinfo=timezone.utc)
     client.update_doc(f"children/{child_id}", fields)
-    parts = []
-    if name is not None:
-        parts.append(f"name={name}")
-    if dob is not None:
-        parts.append(f"dob={dob.date().isoformat()}")
-    console.print(
-        f"[green]Updated child {child_id}:[/green] " + ", ".join(parts)
-    )
+    after = client.get_doc(f"children/{child_id}")
+    console.print(_child_table("After", child_id, after or {}))
 
 
 @children_group.command("list")
@@ -130,20 +160,13 @@ def list_children(ctx: click.Context) -> None:
     table.add_column("Balance", justify="right")
     for child in children:
         balance_cents = child.get("balance", 0)
-        dob_raw = child.get("dateOfBirth")
-        if isinstance(dob_raw, datetime):
-            dob_display = dob_raw.strftime("%Y-%m-%d")
-        elif isinstance(dob_raw, str):
-            dob_display = dob_raw[:10]
-        else:
-            dob_display = "—"
         photo = child.get("photoUrl") or "—"
         parents = child.get("parentUids") or []
         parents_display = ", ".join(parents) if parents else "—"
         table.add_row(
             child.get("_id", "?"),
             child.get("name", "?"),
-            dob_display,
+            _format_dob(child.get("dateOfBirth")),
             photo,
             parents_display,
             f"\u20ac{balance_cents / 100:.2f}",
