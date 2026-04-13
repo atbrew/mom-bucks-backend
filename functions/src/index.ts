@@ -6,6 +6,7 @@
  *
  *   #13 acceptInvite             — callable
  *   #14 removeParentFromChildren — callable
+ *       revertTransaction        — callable
  *   #15 onTransactionCreate      — Firestore trigger (balance recompute)
  *   #16 onChildDelete            — Firestore trigger (cascade cleanup)
  *   #17 sendHabitNotifications   — scheduled (replaces APScheduler)
@@ -17,6 +18,7 @@ export { helloWorld } from "./helloWorld";
 
 export { acceptInvite } from "./handlers/acceptInvite";
 export { removeParentFromChildren } from "./handlers/removeParentFromChildren";
+export { revertTransaction } from "./handlers/revertTransaction";
 export { onTransactionCreate } from "./handlers/onTransactionCreate";
 export { onChildDelete } from "./handlers/onChildDelete";
 export { sendHabitNotifications } from "./handlers/sendHabitNotifications";

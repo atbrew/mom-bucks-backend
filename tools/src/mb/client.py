@@ -216,10 +216,15 @@ class FirestoreClient:
         return {"Authorization": f"Bearer {self.id_token}"}
 
     def get_doc(self, path: str) -> dict | None:
-        """Read a document. Returns decoded fields or None if not found."""
+        """Read a document. Returns decoded fields or None if not found.
+
+        Returns None on 404 (missing) and 403 (permission denied —
+        Firestore returns 403 when rules reference resource.data on a
+        non-existent doc, so it's indistinguishable from "not found").
+        """
         url = f"{self.config.firestore_url}/{path}"
         resp = requests.get(url, headers=self._headers)
-        if resp.status_code == 404:
+        if resp.status_code in (403, 404):
             return None
         resp.raise_for_status()
         return from_firestore_doc(resp.json())
