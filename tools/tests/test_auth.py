@@ -111,6 +111,30 @@ def test_auth_error_renders_cleanly_without_traceback():
     assert "Invalid email or password" in result.output
 
 
+def test_auth_login_error_routes_through_mbgroup():
+    """`mb auth login` with bad credentials must render via MbGroup
+    (Click error line), not via a command-local sys.exit. Regression
+    for the old _sign_in_client which caught AuthError and called
+    `raise SystemExit(1)`, bypassing the CLI-wide error rendering."""
+    from mb.client import AuthError
+    runner = CliRunner()
+
+    with patch("mb.commands.auth.sign_in",
+               side_effect=AuthError("Invalid email or password for foo@bar.")):
+        result = runner.invoke(main, [
+            "auth", "login",
+            "--email", "foo@bar",
+            "--password", "wrong",
+        ])
+
+    assert result.exit_code != 0
+    assert "Traceback" not in result.output
+    assert "Invalid email or password" in result.output
+    # Click's standard error prefix — if we see this the MbGroup
+    # handler fired rather than a bare SystemExit.
+    assert "Error:" in result.output
+
+
 def test_delete_account_refuses_prod():
     """`mb --project prod auth delete-account` must refuse outright.
     This is the first (and strongest) of the defence-in-depth guards:

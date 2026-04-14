@@ -407,18 +407,19 @@ class FirestoreClient:
     def upload_file(self, storage_path: str, local_path: str) -> str:
         """Upload a file to Firebase Storage. Returns the storage path."""
         # Firebase Storage REST API uses the Cloud Storage JSON API.
-        bucket = f"{self.config.project_id}.firebasestorage.app"
-        encoded_path = storage_path.replace("/", "%2F")
-        url = (
-            f"https://firebasestorage.googleapis.com/v0/b/{bucket}"
-            f"/o?uploadType=media&name={encoded_path}"
-        )
+        # Pass the object name via `params` so requests handles URL
+        # encoding for us — the previous `.replace("/", "%2F")` only
+        # escaped slashes, so any future path containing spaces, `#`,
+        # `%`, `?`, etc. would have broken the upload URL.
         import mimetypes
+        bucket = f"{self.config.project_id}.firebasestorage.app"
+        url = f"https://firebasestorage.googleapis.com/v0/b/{bucket}/o"
         content_type = mimetypes.guess_type(local_path)[0] or "image/jpeg"
         with open(local_path, "rb") as f:
             data = f.read()
         resp = requests.post(
             url,
+            params={"uploadType": "media", "name": storage_path},
             headers={
                 **self._headers,
                 "Content-Type": content_type,

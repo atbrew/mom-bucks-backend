@@ -11,7 +11,7 @@ from rich.table import Table
 from firebase_admin._auth_utils import EmailAlreadyExistsError
 
 from ..admin import AdminClient
-from ..client import AuthError, FirestoreClient, ProjectConfig, sign_in
+from ..client import FirestoreClient, ProjectConfig, sign_in
 
 console = Console()
 
@@ -29,12 +29,14 @@ def _user_table(title: str, uid: str, email: str, user_doc: dict | None) -> Tabl
 
 
 def _sign_in_client(config: ProjectConfig, email: str, password: str) -> FirestoreClient:
-    """Sign in and return a FirestoreClient."""
-    try:
-        token_data = sign_in(config.require_api_key(), email, password)
-    except AuthError as e:
-        console.print(f"[red]{e}[/red]")
-        raise SystemExit(1)
+    """Sign in and return a FirestoreClient.
+
+    AuthError is allowed to propagate so the CLI-wide MbGroup handler
+    in cli.py renders it as a clean Click error. Catching it here
+    would create two divergent error paths (sys.exit vs ClickException)
+    and lose that uniformity.
+    """
+    token_data = sign_in(config.require_api_key(), email, password)
     return FirestoreClient(config, token_data["idToken"], token_data["localId"])
 
 

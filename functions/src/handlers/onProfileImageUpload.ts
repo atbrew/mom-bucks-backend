@@ -12,9 +12,15 @@
  *      with the Storage path.
  *
  * The trigger uses onObjectFinalized, which fires on every new object
- * or overwrite. To avoid infinite loops (resize → re-upload → trigger
- * fires again), we check custom metadata: if `resized: "true"` is
- * present, we skip processing.
+ * or overwrite. Loop prevention + memory safety:
+ *   - Size check runs FIRST. If the object is already ≤ MAX_SIZE_BYTES,
+ *     we never download/decode it. This also means the `resized:true`
+ *     metadata flag can't be used as a bypass for oversized uploads —
+ *     the flag is only honoured implicitly via the size gate.
+ *   - Objects above MAX_DOWNLOAD_BYTES are rejected outright (delete
+ *     the upload, don't update photoUrl). This caps our peak memory
+ *     so sharp decoding can't OOM the function container, even though
+ *     storage.rules permits uploads up to 100MB.
  */
 
 import { onObjectFinalized } from "firebase-functions/v2/storage";
@@ -22,8 +28,14 @@ import { logger } from "firebase-functions";
 import sharp from "sharp";
 import { getFirestore, getStorage } from "../admin";
 
-const MAX_SIZE_BYTES = 5 * 1024 * 1024; // 5MB
+const MAX_SIZE_BYTES = 5 * 1024 * 1024; // 5MB — target post-resize size
 const MAX_DIMENSION = 1200; // px — longest edge after resize
+
+// Hard upper bound on what the function will decode. sharp decodes
+// into RAM, so a 20MB JPEG can expand to hundreds of MB of pixel
+// buffer. The default 256MB function container can't survive that.
+// Uploads larger than this are deleted rather than processed.
+const MAX_DOWNLOAD_BYTES = 20 * 1024 * 1024; // 20MB
 
 export const onProfileImageUpload = onObjectFinalized(
   { region: "us-central1" },
@@ -41,23 +53,20 @@ export const onProfileImageUpload = onObjectFinalized(
       return;
     }
 
-    // Skip if this upload was our own resize (prevents infinite loop).
-    const metadata = event.data.metadata ?? {};
-    if (metadata.resized === "true") {
-      logger.info("[onProfileImageUpload] skipping already-resized file", {
-        filePath,
-      });
-      // Still update photoUrl in case it's missing.
-      await updatePhotoUrl(parsed);
-      return;
-    }
-
     const bucket = getStorage().bucket();
     const file = bucket.file(filePath);
     const fileSize = Number(event.data.size ?? 0);
 
+    // Size gate first. This handles three cases in one check:
+    //   1. Already small enough (incl. files we resized on a previous
+    //      fire) → just update photoUrl, no download/decode.
+    //   2. Over MAX_SIZE_BYTES but under MAX_DOWNLOAD_BYTES → resize.
+    //   3. Over MAX_DOWNLOAD_BYTES → reject, can't safely decode.
+    // Putting the size check before the metadata check also closes a
+    // bypass: custom metadata is client-settable, so trusting
+    // `resized:true` alone would let a large upload skip resizing.
     if (fileSize <= MAX_SIZE_BYTES) {
-      logger.info("[onProfileImageUpload] file within size limit, updating photoUrl", {
+      logger.info("[onProfileImageUpload] within size limit, updating photoUrl", {
         filePath,
         size: fileSize,
       });
@@ -65,7 +74,19 @@ export const onProfileImageUpload = onObjectFinalized(
       return;
     }
 
-    // Download, resize, re-upload.
+    if (fileSize > MAX_DOWNLOAD_BYTES) {
+      logger.warn("[onProfileImageUpload] rejecting oversized upload", {
+        filePath,
+        size: fileSize,
+        maxDownloadBytes: MAX_DOWNLOAD_BYTES,
+      });
+      await file.delete({ ignoreNotFound: true });
+      return;
+    }
+
+    // Download, resize, re-upload. sharp needs the full buffer to
+    // decode, so we load the bounded-size file into memory. The 20MB
+    // cap above keeps peak RSS well under a 512MB function container.
     logger.info("[onProfileImageUpload] resizing", {
       filePath,
       originalSize: fileSize,
@@ -116,36 +137,20 @@ export function parseProfilePath(filePath: string): ProfilePath | null {
 }
 
 /**
- * Progressively reduce image quality and dimensions until it fits
- * under MAX_SIZE_BYTES. Converts to JPEG for consistency.
+ * Single-pass resize to JPEG. With a 1200px longest-edge cap and
+ * quality 80, the result is comfortably under the 5MB target for
+ * every photo we accept (MAX_DOWNLOAD_BYTES = 20MB upstream).
+ * Previously this looped on quality/dimension to hit a size budget,
+ * but at this geometry a single pass always fits — the extra
+ * decode/encode cycles just burned CPU.
  */
 async function resizeToFit(input: Buffer): Promise<Buffer> {
-  let quality = 85;
-  let dimension = MAX_DIMENSION;
-
-  while (quality >= 30) {
-    const result = await sharp(input)
-      .resize(dimension, dimension, { fit: "inside", withoutEnlargement: true })
-      .jpeg({ quality })
-      .toBuffer();
-
-    if (result.length <= MAX_SIZE_BYTES) {
-      return result;
-    }
-
-    // Try lower quality first, then reduce dimensions.
-    if (quality > 40) {
-      quality -= 15;
-    } else {
-      dimension = Math.round(dimension * 0.75);
-      quality = 85;
-    }
-  }
-
-  // Last resort: aggressive resize.
   return sharp(input)
-    .resize(600, 600, { fit: "inside", withoutEnlargement: true })
-    .jpeg({ quality: 30 })
+    .resize(MAX_DIMENSION, MAX_DIMENSION, {
+      fit: "inside",
+      withoutEnlargement: true,
+    })
+    .jpeg({ quality: 80 })
     .toBuffer();
 }
 
