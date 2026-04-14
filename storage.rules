@@ -38,12 +38,17 @@ service firebase.storage {
     }
 
     function isChildParent(childId) {
-      // Rules that call get(...).data on a missing doc raise
+      // Rules that call firestore.get(...).data on a missing doc raise
       // permission-denied instead of simply returning false, so we
-      // must gate the lookup with exists() first. Otherwise a
-      // read/write for a nonexistent childId surfaces as a confusing
+      // must gate the lookup with firestore.exists() first. Otherwise
+      // a read/write for a nonexistent childId surfaces as a confusing
       // "permission denied" to the client instead of a clean deny.
-      return exists(/databases/(default)/documents/children/$(childId))
+      //
+      // Cross-service lookups in Storage rules use the `firestore.`
+      // prefix on both functions — bare `exists(...)` is a Firestore
+      // rules builtin and is rejected by the Storage rules compiler
+      // with a warning that silently breaks the check at runtime.
+      return firestore.exists(/databases/(default)/documents/children/$(childId))
           && request.auth.uid in
              firestore.get(/databases/(default)/documents/children/$(childId)).data.parentUids;
     }
