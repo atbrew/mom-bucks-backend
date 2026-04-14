@@ -1,11 +1,82 @@
 rules_version = '2';
 
-// PHASE 0 BASELINE — DO NOT SHIP TO PROD UNCHANGED.
+// Storage rules for profile images.
 //
-// Deny-all placeholder. Real per-child / per-user rules arrive alongside
-// the Storage cutover in a later phase.
+// Two paths:
+//   users/{uid}/profile.jpg          — user's own profile photo
+//   children/{childId}/profile.jpg   — child's profile photo
+//
+// Upload constraints:
+//   - Max 100MB (resize trigger downsizes to ≤5MB server-side)
+//   - Image content types only (image/jpeg, image/png, image/webp)
+//
+// The onProfileImageUpload Cloud Function fires on finalize and:
+//   1. Resizes to ≤5MB if needed (overwrites original)
+//   2. Updates the photoUrl field on the matching Firestore doc
+
 service firebase.storage {
   match /b/{bucket}/o {
+
+    // ── helpers ──────────────────────────────────────────────────
+
+    function isSignedIn() {
+      return request.auth != null;
+    }
+
+    function isImageType() {
+      // Explicit allowlist — must match the header comment above.
+      // `image/*` would accept image/svg+xml, which can carry script
+      // payloads when rendered in a web context and isn't a format
+      // sharp decodes reliably, so we don't want it.
+      return request.resource.contentType == 'image/jpeg'
+          || request.resource.contentType == 'image/png'
+          || request.resource.contentType == 'image/webp';
+    }
+
+    function isUnder100MB() {
+      return request.resource.size < 100 * 1024 * 1024;
+    }
+
+    function isChildParent(childId) {
+      // Rules that call get(...).data on a missing doc raise
+      // permission-denied instead of simply returning false, so we
+      // must gate the lookup with exists() first. Otherwise a
+      // read/write for a nonexistent childId surfaces as a confusing
+      // "permission denied" to the client instead of a clean deny.
+      return exists(/databases/(default)/documents/children/$(childId))
+          && request.auth.uid in
+             firestore.get(/databases/(default)/documents/children/$(childId)).data.parentUids;
+    }
+
+    // ── users/{uid}/profile.jpg ─────────────────────────────────
+
+    match /users/{uid}/profile.jpg {
+      // Only the owning user can read or write their own photo.
+      allow read: if isSignedIn()
+                  && request.auth.uid == uid;
+
+      allow write: if isSignedIn()
+                   && request.auth.uid == uid
+                   && isImageType()
+                   && isUnder100MB();
+    }
+
+    // ── children/{childId}/profile.jpg ──────────────────────────
+
+    match /children/{childId}/profile.jpg {
+      // Any parent in parentUids can read or write. isChildParent
+      // uses exists() first so a missing child doc surfaces as a
+      // plain deny rather than a permission-denied thrown by get().
+      allow read: if isSignedIn() && isChildParent(childId);
+
+      allow write: if isSignedIn()
+                   && isChildParent(childId)
+                   && isImageType()
+                   && isUnder100MB();
+    }
+
+    // ── default deny ────────────────────────────────────────────
+
     match /{allPaths=**} {
       allow read, write: if false;
     }

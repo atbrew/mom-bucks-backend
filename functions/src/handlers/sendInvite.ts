@@ -1,0 +1,175 @@
+/**
+ * sendInvite — co-parenting invite creation callable.
+ *
+ * Replaces client-side Firestore writes to `invites/{token}`. Moving
+ * this path through a callable is what lets us:
+ *
+ *   1. Denormalise `childName` and `invitedByDisplayName` onto the
+ *      invite doc at creation time, so the inbox list view doesn't
+ *      need N+1 reads to render human-readable names.
+ *   2. Normalise `invitedEmail` to lowercase — the inbox rule
+ *      (`invitedEmail == request.auth.token.email.lower()`) relies
+ *      on the stored value being already lowercased. Enforcing that
+ *      in a trusted code path is simpler than a rule-level check.
+ *   3. Set `expiresAt` and `createdAt` server-side, so a bad clock on
+ *      a client can't mint an invite that never expires.
+ *
+ * Security contract:
+ *   - Clients cannot write to `invites/{token}` directly (rules deny
+ *     all client writes on the collection).
+ *   - The caller must be in `parentUids` of the target child. This
+ *     is the same defence-in-depth check the old `allow create` rule
+ *     used to perform — now enforced in trusted code.
+ *
+ * Invite expiry is a fixed 7 days from creation. Changing that window
+ * requires a deploy, which is intentional: short-lived invites are a
+ * security affordance.
+ */
+
+import { onCall, HttpsError } from "firebase-functions/v2/https";
+import { logger } from "firebase-functions";
+import { getFirestore, FieldValue, Timestamp } from "../admin";
+
+const INVITE_TTL_MS = 7 * 24 * 60 * 60 * 1000;
+
+interface ChildDoc {
+  parentUids: string[];
+  name?: string;
+}
+
+export interface SendInviteRequest {
+  childId: string;
+  invitedEmail: string;
+}
+
+export interface SendInviteResponse {
+  token: string;
+}
+
+export type SendInviteDecision =
+  | { kind: "send"; normalizedEmail: string }
+  | { kind: "reject"; code: HttpsError["code"]; message: string };
+
+// ─── Pure decision logic ────────────────────────────────────────────
+
+/**
+ * Given the caller, child doc, and raw invitedEmail, decide whether
+ * the invite should be created. Pure so the parent-membership check
+ * and email normalisation can be unit-tested without the Firestore
+ * transaction machinery.
+ */
+export function decideSendInvite(params: {
+  callerUid: string;
+  childId: string;
+  invitedEmail: string;
+  child: ChildDoc | null;
+}): SendInviteDecision {
+  const { callerUid, childId, invitedEmail, child } = params;
+
+  if (typeof childId !== "string" || childId.length === 0) {
+    return {
+      kind: "reject",
+      code: "invalid-argument",
+      message: "childId is required",
+    };
+  }
+  if (typeof invitedEmail !== "string" || invitedEmail.length === 0) {
+    return {
+      kind: "reject",
+      code: "invalid-argument",
+      message: "invitedEmail is required",
+    };
+  }
+  if (!invitedEmail.includes("@")) {
+    return {
+      kind: "reject",
+      code: "invalid-argument",
+      message: "invitedEmail must be a valid email address",
+    };
+  }
+
+  if (!child) {
+    return {
+      kind: "reject",
+      code: "not-found",
+      message: `child ${childId} not found`,
+    };
+  }
+  if (!child.parentUids?.includes(callerUid)) {
+    return {
+      kind: "reject",
+      code: "permission-denied",
+      message: "caller is not a parent of this child",
+    };
+  }
+
+  return { kind: "send", normalizedEmail: invitedEmail.trim().toLowerCase() };
+}
+
+// ─── Handler ────────────────────────────────────────────────────────
+
+export const sendInvite = onCall<
+  SendInviteRequest,
+  Promise<SendInviteResponse>
+>({ region: "us-central1", invoker: "public" }, async (request) => {
+  if (!request.auth?.uid) {
+    throw new HttpsError(
+      "unauthenticated",
+      "sendInvite requires a signed-in caller",
+    );
+  }
+  const callerUid = request.auth.uid;
+
+  const { childId, invitedEmail } = request.data ?? ({} as SendInviteRequest);
+
+  const db = getFirestore();
+  const childRef = db.doc(`children/${childId}`);
+  const childSnap = await childRef.get();
+  const child = childSnap.exists ? (childSnap.data() as ChildDoc) : null;
+
+  const decision = decideSendInvite({
+    callerUid,
+    childId,
+    invitedEmail,
+    child,
+  });
+  if (decision.kind === "reject") {
+    throw new HttpsError(decision.code, decision.message);
+  }
+
+  // Denormalise display name from the users/{uid} doc. If it's
+  // missing (edge case — trigger hasn't fired yet, or user doc was
+  // deleted), fall back to empty string so the invite still sends.
+  // displayName is cosmetic; the rule check uses invitedByUid.
+  const userSnap = await db.doc(`users/${callerUid}`).get();
+  const invitedByDisplayName =
+    (userSnap.exists ? (userSnap.get("displayName") as string) : "") ?? "";
+
+  // We use Firestore's auto-id as the token. It's 20 chars of secure
+  // random alphabet — same property the old client path relied on.
+  const inviteRef = db.collection("invites").doc();
+  const token = inviteRef.id;
+
+  const expiresAt = Timestamp.fromMillis(Date.now() + INVITE_TTL_MS);
+
+  await inviteRef.set({
+    childId,
+    childName: child?.name ?? "",
+    invitedByUid: callerUid,
+    invitedByDisplayName,
+    invitedEmail: decision.normalizedEmail,
+    expiresAt,
+    createdAt: FieldValue.serverTimestamp(),
+    acceptedByUid: null,
+    acceptedAt: null,
+  });
+
+  logger.info("[sendInvite] invite created", {
+    token,
+    callerUid,
+    childId,
+    invitedEmail: decision.normalizedEmail,
+  });
+
+  return { token };
+});

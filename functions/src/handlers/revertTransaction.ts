@@ -99,7 +99,7 @@ export function decideRevert(params: {
 export const revertTransaction = onCall<
   RevertTransactionRequest,
   Promise<RevertTransactionResponse>
->({ region: "us-central1" }, async (request) => {
+>({ region: "us-central1", invoker: "public" }, async (request) => {
   if (!request.auth?.uid) {
     throw new HttpsError("unauthenticated", "revertTransaction requires a signed-in caller");
   }

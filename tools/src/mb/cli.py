@@ -11,7 +11,7 @@ from __future__ import annotations
 
 import click
 
-from .client import get_project_config
+from .client import AuthError, FirestoreError, get_project_config
 from .commands.auth import auth_group
 from .commands.children import children_group
 from .commands.transactions import transactions_group
@@ -20,7 +20,19 @@ from .commands.invites import invites_group
 from .commands.smoke_test import smoke_test
 
 
-@click.group()
+class MbGroup(click.Group):
+    """Click group that converts our domain errors (AuthError,
+    FirestoreError) into ``click.ClickException`` so they render as a
+    single-line error message instead of a Python traceback."""
+
+    def invoke(self, ctx: click.Context):
+        try:
+            return super().invoke(ctx)
+        except (AuthError, FirestoreError) as e:
+            raise click.ClickException(str(e)) from e
+
+
+@click.group(cls=MbGroup)
 @click.option(
     "--project",
     type=click.Choice(["dev", "prod"]),

@@ -162,7 +162,7 @@ export function decideInviteAcceptance(params: {
 export const acceptInvite = onCall<
   AcceptInviteRequest,
   Promise<AcceptInviteResponse>
->({ region: "us-central1" }, async (request) => {
+>({ region: "us-central1", invoker: "public" }, async (request) => {
   if (!request.auth?.uid) {
     throw new HttpsError(
       "unauthenticated",

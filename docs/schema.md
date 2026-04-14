@@ -143,17 +143,58 @@ parent wants to share two children they send two links. Keeping the
 invite single-child keeps the security boundary trivial: one invite,
 one `arrayUnion` at acceptance time.
 
-| Field          | Type            | Notes                                                                                  |
-|----------------|-----------------|----------------------------------------------------------------------------------------|
-| `childId`      | `string`        | Which child to grant the invitee access to. **Drives co-parenting.**                   |
-| `invitedEmail` | `string \| null`| Optional email to gate the redemption (nice-to-have, not required for the model).      |
-| `invitedByUid` | `string`        | The parent who issued the invite.                                                      |
-| `expiresAt`    | `Timestamp`     | Hard expiry — `acceptInvite` (#13) rejects after this.                                 |
-| `acceptedByUid`| `string \| null`| Set on first redemption, locks the invite.                                             |
-| `acceptedAt`   | `Timestamp \| null` | Set on first redemption.                                                           |
+| Field                   | Type            | Notes                                                                                  |
+|-------------------------|-----------------|----------------------------------------------------------------------------------------|
+| `childId`               | `string`        | Which child to grant the invitee access to. **Drives co-parenting.**                   |
+| `childName`             | `string`        | Denormalised from `children/{childId}.name` at send time, so the inbox can render names without N+1 reads. Cosmetic — the rule check uses `childId`. |
+| `invitedEmail`          | `string`        | Invitee's email, **lowercased** server-side. The inbox rule matches `request.auth.token.email.lower()`, so the stored value must be pre-lowercased. |
+| `invitedByUid`          | `string`        | The parent who issued the invite. Stamped by `sendInvite` from `request.auth.uid`.     |
+| `invitedByDisplayName`  | `string`        | Denormalised from `users/{invitedByUid}.displayName` at send time. Cosmetic; may be empty if the user doc is missing. |
+| `expiresAt`             | `Timestamp`     | Server-stamped by `sendInvite` as `now + 7d`. `acceptInvite` rejects after this.       |
+| `createdAt`             | `Timestamp`     | `FieldValue.serverTimestamp()` at send time.                                           |
+| `acceptedByUid`         | `string \| null`| Set by `acceptInvite` on first redemption, locks the invite.                           |
+| `acceptedAt`            | `Timestamp \| null` | Set by `acceptInvite` on first redemption.                                         |
 
-Reads: unauthenticated allowed (the URL is the secret). Writes: only via
-the `acceptInvite` callable (#13) — direct client writes are denied.
+**Reads:**
+- `get` (by token): unauthenticated allowed — the URL is the secret.
+- `list`: scoped to the caller. A signed-in user can list invites
+  where `invitedEmail == request.auth.token.email.lower()` (inbox) or
+  `invitedByUid == request.auth.uid` (sent). Unfiltered listing is
+  denied to prevent harvesting invitee emails (PII) and childIds.
+
+**Writes:** direct client writes are denied. All mutations flow
+through three callables:
+
+| Callable | Effect | Caller constraint |
+|----------|--------|-------------------|
+| `sendInvite`   | Creates the doc, stamps `invitedByUid`, `createdAt`, `expiresAt`; denormalises names; lowercases `invitedEmail`. | Caller must be in `parentUids` of the target child. |
+| `acceptInvite` | Sets `acceptedByUid`/`acceptedAt` and `arrayUnion`s the caller into the child's `parentUids`. | Caller must be signed in; invite must be unaccepted and unexpired. |
+| `revokeInvite` | Deletes the invite doc. | Caller must equal `invitedByUid`; invite must be unaccepted (accepted invites must be undone via `removeParentFromChildren`). |
+
+## Storage (profile images)
+
+Profile photos are stored in Firebase Storage at predictable paths:
+
+| Path | Owner | Notes |
+|------|-------|-------|
+| `users/{uid}/profile.jpg` | User themselves | Only the owning user can read/write |
+| `children/{childId}/profile.jpg` | Parents (via `parentUids`) | Any parent can read/write |
+
+**Upload constraints:** max 100MB, image content types only (`image/*`).
+
+**Server-side resize:** The `onProfileImageUpload` Cloud Function fires
+on every upload. If the file exceeds 5MB, it downloads the image,
+progressively resizes using `sharp` (max 1200px longest edge, JPEG
+quality stepping down from 85), and overwrites the original. The
+function then sets `photoUrl` on the corresponding Firestore doc
+(`users/{uid}` or `children/{childId}`).
+
+**Infinite-loop prevention:** The re-uploaded file carries custom
+metadata `{ resized: "true" }`. On the next trigger fire the function
+sees this flag and skips resize processing.
+
+**Cleanup:** `onChildDelete` (#16) already deletes
+`children/{childId}/profile.jpg` on child deletion.
 
 ## Monetary values
 
@@ -238,8 +279,11 @@ Full rules live in `firestore.rules`. The model in plain English:
   trigger's clamp-at-zero path remains as defense-in-depth for
   Admin-SDK writers (which bypass rules) and concurrent-WITHDRAW
   races.
-- `invites/{token}` — readable unauthenticated (URL is the secret),
-  not directly writable.
+- `invites/{token}` — `get` by token is readable unauthenticated (URL
+  is the secret); `list` is scoped to the caller (own inbox or own
+  sent invites only — anonymous/unscoped list is denied to avoid
+  harvesting PII). Client writes are fully denied; all mutations flow
+  through `sendInvite` / `acceptInvite` / `revokeInvite` callables.
 
 ## Co-parenting walkthrough
 
@@ -247,9 +291,12 @@ Concrete sequence to make the model click:
 
 1. **Alice signs up.** `users/alice` is created. Alice creates her son
    Sam: `children/sam = { name: "Sam", parentUids: ["alice"], createdByUid: "alice", ... }`.
-2. **Alice invites Bob to co-parent Sam.** Alice's client creates
-   `invites/<token> = { childId: "sam", invitedByUid: "alice", expiresAt: ... }`
-   and shares the invite URL with Bob.
+2. **Alice invites Bob to co-parent Sam.** Alice's client calls the
+   `sendInvite` callable, which creates
+   `invites/<token> = { childId: "sam", childName: "Sam",
+   invitedByUid: "alice", invitedByDisplayName: "Alice",
+   invitedEmail: "bob@example.com", expiresAt: now + 7d, ... }` and
+   returns the token. Alice shares the invite URL with Bob.
 3. **Bob signs up and opens the link.** Bob's client calls the
    `acceptInvite` callable (#13). The function reads the invite, appends
    `"bob"` to `children/sam.parentUids` via `arrayUnion`, and marks the

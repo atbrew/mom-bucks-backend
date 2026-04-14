@@ -36,12 +36,16 @@ import {
   RulesTestEnvironment,
 } from "@firebase/rules-unit-testing";
 import {
+  collection,
   doc,
   getDoc,
+  getDocs,
+  query,
   setDoc,
   updateDoc,
   deleteDoc,
   serverTimestamp,
+  where,
 } from "firebase/firestore";
 
 // Resolve the rules file from the repo root. Test file lives at
@@ -1437,16 +1441,122 @@ describe("invites/{token}", () => {
     });
   });
 
-  describe("create", () => {
+  // ─── list ────────────────────────────────────────────────────────
+  //
+  // Splitting `read` into `get` and `list`: `get` by token stays
+  // public (link-sharing), but `list` queries must be scoped to the
+  // caller, otherwise any signed-in (or even unauthenticated!) user
+  // can dump every invite in the system — invitee emails are PII,
+  // childIds are secrets we rely on elsewhere, and inviter UIDs
+  // shouldn't be harvestable.
+  //
+  // Rule shape: a signed-in user can list invites where
+  //   resource.data.invitedEmail == request.auth.token.email.lower()  (inbox)
+  //   OR resource.data.invitedByUid == request.auth.uid                (sent)
+  describe("list", () => {
+    it("allows a user to list invites addressed to their email (inbox)", async () => {
+      await seedInvite("tok1", "alice", "sam",
+        { invitedEmail: "bob@example.com" });
+      const bob = env.authenticatedContext("bob",
+        { email: "bob@example.com" }).firestore();
+      await assertSucceeds(
+        getDocs(query(collection(bob, "invites"),
+          where("invitedEmail", "==", "bob@example.com"))),
+      );
+    });
+
+    it("allows a user to list invites they sent (by invitedByUid)", async () => {
+      await seedInvite("tok1", "alice", "sam",
+        { invitedEmail: "bob@example.com" });
+      const alice = env.authenticatedContext("alice",
+        { email: "alice@example.com" }).firestore();
+      await assertSucceeds(
+        getDocs(query(collection(alice, "invites"),
+          where("invitedByUid", "==", "alice"))),
+      );
+    });
+
+    it("denies a user from listing invites addressed to someone else", async () => {
+      await seedInvite("tok1", "alice", "sam",
+        { invitedEmail: "bob@example.com" });
+      const eve = env.authenticatedContext("eve",
+        { email: "eve@example.com" }).firestore();
+      await assertFails(
+        getDocs(query(collection(eve, "invites"),
+          where("invitedEmail", "==", "bob@example.com"))),
+      );
+    });
+
+    it("denies a user from listing invites sent by someone else", async () => {
+      await seedInvite("tok1", "alice", "sam",
+        { invitedEmail: "bob@example.com" });
+      const eve = env.authenticatedContext("eve",
+        { email: "eve@example.com" }).firestore();
+      await assertFails(
+        getDocs(query(collection(eve, "invites"),
+          where("invitedByUid", "==", "alice"))),
+      );
+    });
+
+    it("denies an unfiltered list even from a signed-in user", async () => {
+      // No where()-clause: query could return invites belonging to
+      // anyone, so rules must reject the whole query up-front.
+      await seedInvite("tok1", "alice", "sam",
+        { invitedEmail: "bob@example.com" });
+      const bob = env.authenticatedContext("bob",
+        { email: "bob@example.com" }).firestore();
+      await assertFails(getDocs(collection(bob, "invites")));
+    });
+
+    it("denies an unauthenticated list", async () => {
+      // Today this is the critical PII leak: `allow read: if true`
+      // lets anyone dump every invite's invitee email + childId.
+      await seedInvite("tok1", "alice", "sam",
+        { invitedEmail: "bob@example.com" });
+      const anon = env.unauthenticatedContext().firestore();
+      await assertFails(getDocs(collection(anon, "invites")));
+    });
+
+    it("inbox match is case-insensitive (rule lowercases auth email)", async () => {
+      // invitedEmail is stored lowercased (send callable will enforce
+      // this). A user whose Firebase Auth email was entered as
+      // "Bob@Example.com" must still match an invite addressed to
+      // "bob@example.com" — otherwise inbox breaks for anyone with a
+      // mixed-case signup.
+      await seedInvite("tok1", "alice", "sam",
+        { invitedEmail: "bob@example.com" });
+      const bob = env.authenticatedContext("bob",
+        { email: "Bob@Example.com" }).firestore();
+      await assertSucceeds(
+        getDocs(query(collection(bob, "invites"),
+          where("invitedEmail", "==", "bob@example.com"))),
+      );
+    });
+  });
+
+  // ─── write (all mutations via callables) ─────────────────────────
+  //
+  // Every invite mutation lives behind a callable:
+  //   create  → sendInvite    (denormalises names, normalises email,
+  //                            server-side expiresAt)
+  //   update  → acceptInvite  (Admin SDK, bypasses rules)
+  //   delete  → revokeInvite  (inviter-only, unaccepted)
+  //
+  // The per-field validation previously tested here (empty childId,
+  // non-string childId, invitedByUid stamping, expiresAt-in-past,
+  // etc.) now lives in the callables' unit tests. Rules only need to
+  // prove: clients cannot touch the collection's write surface.
+  describe("write (callables only)", () => {
     const futureDate = () => new Date(Date.now() + 24 * 60 * 60 * 1000);
 
-    it("allows a signed-in user to create an invite with their own uid as invitedByUid", async () => {
+    it("denies direct create even by a legitimate parent", async () => {
+      await seedChild("sam", ["alice"]);
       const alice = env.authenticatedContext("alice").firestore();
-      await assertSucceeds(
+      await assertFails(
         setDoc(doc(alice, "invites/tok1"), {
           childId: "sam",
           invitedByUid: "alice",
-          invitedEmail: null,
+          invitedEmail: "bob@example.com",
           expiresAt: futureDate(),
           acceptedByUid: null,
           acceptedAt: null,
@@ -1454,101 +1564,34 @@ describe("invites/{token}", () => {
       );
     });
 
-    it("denies creating an invite stamped with someone else's uid", async () => {
-      const alice = env.authenticatedContext("alice").firestore();
-      await assertFails(
-        setDoc(doc(alice, "invites/tok1"), {
-          childId: "sam",
-          invitedByUid: "bob",
-          expiresAt: futureDate(),
-          acceptedByUid: null,
-        }),
-      );
-    });
-
-    it("denies creating an invite with an empty childId", async () => {
-      const alice = env.authenticatedContext("alice").firestore();
-      await assertFails(
-        setDoc(doc(alice, "invites/tok1"), {
-          childId: "",
-          invitedByUid: "alice",
-          expiresAt: futureDate(),
-          acceptedByUid: null,
-        }),
-      );
-    });
-
-    it("denies creating an invite with childId as a non-string (e.g. an array, guarding the old multi-child shape)", async () => {
-      // Invites are issued one child at a time. If a client still sends
-      // the legacy `childIds: [...]` shape (or any non-string), rules
-      // must reject it so the stored data stays consistent with what
-      // acceptInvite (#13) expects.
-      const alice = env.authenticatedContext("alice").firestore();
-      await assertFails(
-        setDoc(doc(alice, "invites/tok1"), {
-          childId: ["sam"],
-          invitedByUid: "alice",
-          expiresAt: futureDate(),
-          acceptedByUid: null,
-        }),
-      );
-    });
-
-    it("denies creating an invite with expiresAt in the past", async () => {
-      const alice = env.authenticatedContext("alice").firestore();
-      await assertFails(
-        setDoc(doc(alice, "invites/tok1"), {
-          childId: "sam",
-          invitedByUid: "alice",
-          expiresAt: new Date(Date.now() - 1000),
-          acceptedByUid: null,
-        }),
-      );
-    });
-
-    it("denies creating an invite with acceptedByUid already set", async () => {
-      const alice = env.authenticatedContext("alice").firestore();
-      await assertFails(
-        setDoc(doc(alice, "invites/tok1"), {
-          childId: "sam",
-          invitedByUid: "alice",
-          expiresAt: futureDate(),
-          acceptedByUid: "bob",
-        }),
-      );
-    });
-
-    it("denies unauthenticated creates", async () => {
+    it("denies unauthenticated create", async () => {
       const anon = env.unauthenticatedContext().firestore();
       await assertFails(
         setDoc(doc(anon, "invites/tok1"), {
           childId: "sam",
           invitedByUid: "alice",
+          invitedEmail: "bob@example.com",
           expiresAt: futureDate(),
           acceptedByUid: null,
         }),
       );
     });
-  });
 
-  describe("update", () => {
-    it("denies direct updates even by the creator (acceptance must go through #13)", async () => {
+    it("denies direct update even by the inviter", async () => {
       await seedInvite("tok1", "alice", "sam");
       const alice = env.authenticatedContext("alice").firestore();
       await assertFails(
         updateDoc(doc(alice, "invites/tok1"), { acceptedByUid: "bob" }),
       );
     });
-  });
 
-  describe("delete", () => {
-    it("allows the inviter to revoke an unclaimed invite", async () => {
+    it("denies direct delete even by the inviter (must use revokeInvite)", async () => {
       await seedInvite("tok1", "alice", "sam");
       const alice = env.authenticatedContext("alice").firestore();
-      await assertSucceeds(deleteDoc(doc(alice, "invites/tok1")));
+      await assertFails(deleteDoc(doc(alice, "invites/tok1")));
     });
 
-    it("denies another user from deleting someone else's invite", async () => {
+    it("denies direct delete by a non-inviter", async () => {
       await seedInvite("tok1", "alice", "sam");
       const bob = env.authenticatedContext("bob").firestore();
       await assertFails(deleteDoc(doc(bob, "invites/tok1")));
