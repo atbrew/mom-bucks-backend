@@ -339,34 +339,48 @@ service cloud.firestore {
     // the caller's identity against it in a single `create` rule.
     match /invites/{token} {
 
-      // READ — anyone who knows the token can read the invite.
+      // GET — anyone who knows the token can read the invite.
       // Unauthenticated access is intentional; the token is the secret.
-      allow read: if true;
+      // This preserves the "share a magic link out-of-band" UX.
+      allow get: if true;
 
-      // CREATE — the inviter must be authenticated and stamp their
-      // own uid into `invitedByUid`, `childId` must be a non-empty
-      // string (invites are issued one child at a time — no multi-child
-      // fan-out), and the invite must have a future `expiresAt`.
+      // LIST — scoped strictly. A signed-in user can query invites
+      // matching THEIR email (inbox) or sent BY them (sent list),
+      // and nothing else. Without this clamp, `allow read: if true`
+      // let unauthenticated clients dump every invite in the system
+      // — invitee emails are PII, childIds are secrets used elsewhere,
+      // and inviter UIDs shouldn't be harvestable.
       //
-      // We cannot verify here that the inviter is actually in the
-      // child's parentUids — rules cannot make the membership check
-      // conditional on another doc's field during a create on this
-      // doc. acceptInvite (#13) re-verifies membership at acceptance
-      // time, which is where the real security boundary sits.
-      allow create: if isSignedIn()
-                    && request.resource.data.invitedByUid == request.auth.uid
-                    && request.resource.data.childId is string
-                    && request.resource.data.childId.size() > 0
-                    && request.resource.data.expiresAt > request.time
-                    && request.resource.data.acceptedByUid == null;
+      // The `.lower()` on the auth token email is essential: Firebase
+      // Auth stores emails in the case the user typed them at signup
+      // (so "Bob@Example.com" is valid), but the invite doc's
+      // `invitedEmail` is normalised to lowercase at write time
+      // (enforced by the sendInvite callable). Without the lower()
+      // the inbox breaks for anyone with a mixed-case email.
+      allow list: if isSignedIn()
+                   && (
+                        (resource.data.invitedEmail != null
+                          && request.auth.token.email != null
+                          && resource.data.invitedEmail ==
+                             request.auth.token.email.lower())
+                        || resource.data.invitedByUid == request.auth.uid
+                      );
 
-      // UPDATE — denied. The only legitimate mutation is acceptance,
-      // which goes through the acceptInvite callable.
-      allow update: if false;
-
-      // DELETE — the inviter can revoke an unclaimed invite.
-      allow delete: if isSignedIn()
-                    && resource.data.invitedByUid == request.auth.uid;
+      // WRITE — denied for all clients. Every mutation on the
+      // invites collection goes through a callable:
+      //   create  → sendInvite   (denormalises childName + inviter
+      //                           displayName, lowercases email,
+      //                           sets server-side expiresAt)
+      //   update  → acceptInvite (sets acceptedByUid + acceptedAt
+      //                           and arrayUnion's the caller into
+      //                           the child's parentUids)
+      //   delete  → revokeInvite (inviter-only, not-yet-accepted)
+      //
+      // Centralising all writes behind callables gives us a single
+      // trusted code path per operation with consistent validation,
+      // denormalisation, and auditability. Direct client writes would
+      // have to replicate all of that and would inevitably drift.
+      allow write: if false;
     }
 
     // ─────────────────────────────────────────────────────────────────

@@ -106,6 +106,16 @@ class FirestoreError(RuntimeError):
     response body attached so rule-denial reasons are visible."""
 
 
+def _check(resp: requests.Response, operation: str) -> None:
+    """Raise ``FirestoreError`` on any 4xx/5xx response, including the
+    status code and body so the CLI can render a useful one-line error
+    instead of letting ``requests.HTTPError`` propagate as a traceback."""
+    if resp.status_code >= 400:
+        raise FirestoreError(
+            f"{operation} failed ({resp.status_code}): {resp.text}"
+        )
+
+
 def sign_in(api_key: str | ProjectConfig, email: str, password: str) -> dict:
     """Sign in via Firebase Auth REST API, return the full response.
 
@@ -226,7 +236,7 @@ class FirestoreClient:
         resp = requests.get(url, headers=self._headers)
         if resp.status_code in (403, 404):
             return None
-        resp.raise_for_status()
+        _check(resp, f"get_doc {path}")
         return from_firestore_doc(resp.json())
 
     def create_doc(
@@ -246,7 +256,7 @@ class FirestoreClient:
         resp = requests.post(
             url, headers=self._headers, json=body, params=params,
         )
-        resp.raise_for_status()
+        _check(resp, f"create_doc {collection}")
         # Document name is like "projects/.../documents/children/abc123"
         name = resp.json()["name"]
         return name.split("/")[-1]
@@ -317,7 +327,7 @@ class FirestoreClient:
         resp = requests.patch(
             url, headers=self._headers, json=body, params=params,
         )
-        resp.raise_for_status()
+        _check(resp, f"update_doc {path}")
 
     def delete_doc(self, path: str) -> None:
         """Delete a document."""
@@ -325,13 +335,13 @@ class FirestoreClient:
         resp = requests.delete(url, headers=self._headers)
         if resp.status_code == 404:
             return
-        resp.raise_for_status()
+        _check(resp, f"delete_doc {path}")
 
     def list_collection(self, path: str) -> list[dict]:
         """List all documents in a collection. Returns decoded docs."""
         url = f"{self.config.firestore_url}/{path}"
         resp = requests.get(url, headers=self._headers)
-        resp.raise_for_status()
+        _check(resp, f"list_collection {path}")
         results = []
         for doc in resp.json().get("documents", []):
             doc_id = doc["name"].split("/")[-1]
@@ -362,7 +372,7 @@ class FirestoreClient:
             }
         }
         resp = requests.post(url, headers=self._headers, json=body)
-        resp.raise_for_status()
+        _check(resp, f"query {collection}")
         results = []
         for item in resp.json():
             doc = item.get("document")
@@ -384,15 +394,43 @@ class FirestoreClient:
             },
             json={"data": data},
         )
-        resp.raise_for_status()
+        _check(resp, f"call_function {name}")
         return resp.json().get("result", {})
 
     def call_http_function(self, name: str) -> dict:
         """Invoke an HTTP Cloud Function (GET)."""
         url = f"{self.config.functions_url}/{name}"
         resp = requests.get(url, headers=self._headers)
-        resp.raise_for_status()
+        _check(resp, f"call_http_function {name}")
         return resp.json()
+
+    def upload_file(self, storage_path: str, local_path: str) -> str:
+        """Upload a file to Firebase Storage. Returns the storage path."""
+        # Firebase Storage REST API uses the Cloud Storage JSON API.
+        bucket = f"{self.config.project_id}.firebasestorage.app"
+        encoded_path = storage_path.replace("/", "%2F")
+        url = (
+            f"https://firebasestorage.googleapis.com/v0/b/{bucket}"
+            f"/o?uploadType=media&name={encoded_path}"
+        )
+        import mimetypes
+        content_type = mimetypes.guess_type(local_path)[0] or "image/jpeg"
+        with open(local_path, "rb") as f:
+            data = f.read()
+        resp = requests.post(
+            url,
+            headers={
+                **self._headers,
+                "Content-Type": content_type,
+            },
+            data=data,
+        )
+        if resp.status_code >= 400:
+            raise FirestoreError(
+                f"Upload failed ({resp.status_code}) for "
+                f"{storage_path}: {resp.text}"
+            )
+        return storage_path
 
     def poll_doc_field(
         self,

@@ -108,7 +108,7 @@ export function decideRemoval(params: {
 export const removeParentFromChildren = onCall<
   RemoveParentRequest,
   Promise<RemoveParentResponse>
->({ region: "us-central1" }, async (request) => {
+>({ region: "us-central1", invoker: "public" }, async (request) => {
   if (!request.auth?.uid) {
     throw new HttpsError(
       "unauthenticated",

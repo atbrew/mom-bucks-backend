@@ -45,8 +45,17 @@ def children_group(ctx: click.Context, email: str, password: str) -> None:
     type=click.DateTime(["%Y-%m-%d"]),
     help="Date of birth (YYYY-MM-DD).",
 )
+@click.option(
+    "--photo",
+    "photo_path",
+    default=None,
+    type=click.Path(exists=True),
+    help="Path to profile photo (uploaded to Storage).",
+)
 @click.pass_context
-def create_child(ctx: click.Context, name: str, dob: datetime) -> None:
+def create_child(
+    ctx: click.Context, name: str, dob: datetime, photo_path: str | None,
+) -> None:
     """Create a new child."""
     client = _get_client(ctx)
     dob_utc = dob.replace(tzinfo=timezone.utc)
@@ -71,6 +80,19 @@ def create_child(ctx: click.Context, name: str, dob: datetime) -> None:
         f"[green]Created child:[/green] {name} "
         f"(DOB {dob_utc.date().isoformat()}, ID: {child_id})"
     )
+    if photo_path:
+        storage_path = f"children/{child_id}/profile.jpg"
+        client.upload_file(storage_path, photo_path)
+        console.print(f"[green]Photo uploaded:[/green] {storage_path}")
+        console.print("[dim]Waiting for photoUrl update...[/dim]")
+        try:
+            client.poll_doc_field(
+                f"children/{child_id}", "photoUrl", storage_path,
+                timeout_s=15, interval_s=3,
+            )
+            console.print(f"[green]photoUrl set.[/green]")
+        except TimeoutError:
+            console.print("[yellow]photoUrl not yet set — trigger may still be running.[/yellow]")
 
 
 def _format_dob(dob_raw: object) -> str:
@@ -114,16 +136,33 @@ def _child_table(title: str, child_id: str, child: dict) -> Table:
     type=click.DateTime(["%Y-%m-%d"]),
     help="New date of birth (YYYY-MM-DD). Must stay a valid date.",
 )
+@click.option(
+    "--photo",
+    "photo_path",
+    default=None,
+    type=click.Path(exists=True),
+    help="Path to new profile photo (uploaded to Storage).",
+)
+@click.option(
+    "--clear-photo",
+    is_flag=True,
+    default=False,
+    help="Remove the profile photo (set photoUrl to null).",
+)
 @click.pass_context
 def update_child(
     ctx: click.Context,
     child_id: str,
     name: str | None,
     dob: datetime | None,
+    photo_path: str | None,
+    clear_photo: bool,
 ) -> None:
-    """Update mutable fields on a child (name, dateOfBirth)."""
-    if name is None and dob is None:
-        raise click.UsageError("Pass at least one of --name, --dob.")
+    """Update mutable fields on a child (name, dateOfBirth, photo)."""
+    if name is None and dob is None and photo_path is None and not clear_photo:
+        raise click.UsageError("Pass at least one of --name, --dob, --photo, --clear-photo.")
+    if photo_path and clear_photo:
+        raise click.UsageError("Cannot use --photo and --clear-photo together.")
     client = _get_client(ctx)
     before = client.get_doc(f"children/{child_id}")
     if not before:
@@ -135,9 +174,27 @@ def update_child(
         fields["name"] = name
     if dob is not None:
         fields["dateOfBirth"] = dob.replace(tzinfo=timezone.utc)
-    client.update_doc(f"children/{child_id}", fields)
-    after = client.get_doc(f"children/{child_id}")
-    console.print(_child_table("After", child_id, after or {}))
+    if clear_photo:
+        fields["photoUrl"] = None
+    if fields:
+        client.update_doc(f"children/{child_id}", fields)
+    if clear_photo:
+        console.print("[green]Photo cleared.[/green]")
+    if photo_path:
+        storage_path = f"children/{child_id}/profile.jpg"
+        client.upload_file(storage_path, photo_path)
+        console.print(f"[green]Photo uploaded:[/green] {storage_path}")
+        console.print("[dim]Waiting for photoUrl update...[/dim]")
+        try:
+            after = client.poll_doc_field(
+                f"children/{child_id}", "photoUrl", storage_path,
+                timeout_s=15, interval_s=3,
+            )
+        except TimeoutError:
+            after = client.get_doc(f"children/{child_id}") or {}
+    else:
+        after = client.get_doc(f"children/{child_id}") or {}
+    console.print(_child_table("After", child_id, after))
 
 
 @children_group.command("list")

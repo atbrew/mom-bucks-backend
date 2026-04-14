@@ -75,6 +75,52 @@ class AdminClient:
         self.tracker.add_user(user.uid)
         return user.uid
 
+    def list_users(self) -> list:
+        """Iterate all Firebase Auth users, yielding UserRecord objects.
+
+        Handles pagination via ``iterate_all()`` so callers get a flat
+        list without dealing with page tokens.
+        """
+        return list(auth.list_users(app=self.app).iterate_all())
+
+    def get_user_by_email(self, email: str):
+        """Look up a user by email. Returns UserRecord or None."""
+        try:
+            return auth.get_user_by_email(email, app=self.app)
+        except auth.UserNotFoundError:
+            return None
+
+    def delete_user(self, uid: str) -> None:
+        """Delete a Firebase Auth user. Raises on Admin SDK errors."""
+        auth.delete_user(uid, app=self.app)
+
+    def children_of(self, uid: str) -> list[tuple[str, list[str]]]:
+        """Return ``(child_id, parent_uids)`` for every child doc that
+        lists ``uid`` in ``parentUids``.
+
+        Uses the Admin SDK (bypasses security rules) so it works even
+        for a user whose account is being torn down.
+        """
+        from google.cloud.firestore_v1.base_query import FieldFilter
+        q = self.db.collection("children").where(
+            filter=FieldFilter("parentUids", "array_contains", uid),
+        )
+        result: list[tuple[str, list[str]]] = []
+        for doc in q.stream():
+            data = doc.to_dict() or {}
+            result.append((doc.id, list(data.get("parentUids", []))))
+        return result
+
+    def recursive_delete_child(self, child_id: str) -> None:
+        """Recursively delete ``children/{child_id}`` and every
+        subcollection beneath it (transactions, activities, …).
+
+        Storage objects at ``children/{child_id}/…`` are NOT cleaned
+        up — they'll orphan in the bucket. Good enough for dev
+        cleanup; not for prod.
+        """
+        self.db.recursive_delete(self.db.document(f"children/{child_id}"))
+
     def track_doc(self, path: str) -> None:
         """Register a Firestore document path for cleanup."""
         self.tracker.add_doc(path)
