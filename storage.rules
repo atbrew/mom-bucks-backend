@@ -48,7 +48,14 @@ service firebase.storage {
       // prefix on both functions — bare `exists(...)` is a Firestore
       // rules builtin and is rejected by the Storage rules compiler
       // with a warning that silently breaks the check at runtime.
-      return firestore.exists(/databases/(default)/documents/children/$(childId))
+      //
+      // isSignedIn() short-circuits before request.auth.uid is read,
+      // so an unauthenticated caller gets a clean deny instead of an
+      // evaluation error. All current call sites already gate on
+      // isSignedIn() first, but folding it in here makes the helper
+      // safe on its own — matches firestore.rules:isChildParent().
+      return isSignedIn()
+          && firestore.exists(/databases/(default)/documents/children/$(childId))
           && request.auth.uid in
              firestore.get(/databases/(default)/documents/children/$(childId)).data.parentUids;
     }
