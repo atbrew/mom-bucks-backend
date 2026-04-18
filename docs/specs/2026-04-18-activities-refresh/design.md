@@ -457,9 +457,16 @@ Transaction:
    - `roomAfterInterest = vault.target - vault.balance`.
    - If `roomAfterInterest == 0`: skip to step D (interest filled
      the vault; no room for the deposit).
-   - If `vault.matching != null`, each €1 deposited eats
-     `(1 + matching.rate)` of room. So
-     `maxDeposit = floor(roomAfterInterest / (1 + matching.rate))`.
+   - If `vault.matching != null`, each cent deposited lands `1 +
+     floor(d · matching.rate)` cents in the vault (deposit + match,
+     match floored to integer cents). Pick the **largest integer `d`**
+     such that `d + floor(d · matching.rate) <= roomAfterInterest`.
+     Call this `maxDeposit`. The naive `floor(roomAfterInterest /
+     (1 + rate))` is a safe lower bound but can leave a cent gap
+     when `rate` is fractional (e.g. `R=10, rate=0.5`: naive → 6
+     for a total of 9; tight → 7 for a total of 10). Prefer the
+     tight form; implementation may use a closed-form solve or
+     binary search on `d`.
    - If `vault.matching == null`: `maxDeposit = roomAfterInterest`.
    - `actualDeposit = min(amount, maxDeposit)`.
 6. **Step C — apply the deposit + match:**
