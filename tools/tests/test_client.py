@@ -7,7 +7,14 @@ from __future__ import annotations
 
 from unittest.mock import MagicMock, patch
 
-from mb.client import FirestoreClient, ProjectConfig, get_project_config
+from mb.client import (
+    FirestoreClient,
+    FirestoreError,
+    ProjectConfig,
+    _extract_error_message,
+    _check,
+    get_project_config,
+)
 
 
 def _client() -> FirestoreClient:
@@ -82,6 +89,36 @@ def test_emu_project_alias_routes_every_endpoint_to_localhost():
     # returns a sentinel string so the Auth REST call still has a
     # non-empty query param.
     assert config.require_api_key() == "fake-emulator-key"
+
+
+def test_extract_error_message_unwraps_firebase_envelope():
+    """Firebase REST errors come back as ``{"error": {"message": "..."}}``.
+    The rules-denial message ships with leading whitespace + line numbers
+    — we still want that readable, just trimmed, not the raw JSON body.
+    """
+    resp = MagicMock(text='{"error":{"message":"\\n  already a parent","status":"ALREADY_EXISTS"}}')
+    resp.json.return_value = {
+        "error": {"message": "\n  already a parent", "status": "ALREADY_EXISTS"}
+    }
+    assert _extract_error_message(resp) == "already a parent"
+
+
+def test_extract_error_message_falls_back_to_text_on_non_json():
+    resp = MagicMock(text="plain 500 body")
+    resp.json.side_effect = ValueError("not json")
+    assert _extract_error_message(resp) == "plain 500 body"
+
+
+def test_check_raises_with_unwrapped_message():
+    resp = MagicMock(status_code=400, text='{"error":{"message":"denied"}}')
+    resp.json.return_value = {"error": {"message": "denied"}}
+    try:
+        _check(resp, "op")
+    except FirestoreError as e:
+        assert "denied" in str(e)
+        assert '{"error"' not in str(e)
+    else:
+        raise AssertionError("_check did not raise on 400")
 
 
 def test_prod_and_dev_aliases_still_point_at_google_hosts():

@@ -173,13 +173,37 @@ class FirestoreError(RuntimeError):
     response body attached so rule-denial reasons are visible."""
 
 
+def _extract_error_message(resp: requests.Response) -> str:
+    """Pull a human-friendly message from a Firebase error response.
+
+    Firebase REST errors come back as ``{"error": {"message": "...",
+    "status": "..."}}``. Rules-denial messages are already readable but
+    have leading whitespace and line-number noise — strip that so the
+    CLI shows one clean line. Fall back to the raw body on anything we
+    don't recognise."""
+    try:
+        payload = resp.json()
+    except ValueError:
+        return resp.text.strip()
+    if isinstance(payload, dict):
+        err = payload.get("error")
+        if isinstance(err, dict):
+            msg = err.get("message")
+            if isinstance(msg, str) and msg.strip():
+                return msg.strip()
+        if isinstance(err, str) and err.strip():
+            return err.strip()
+    return resp.text.strip()
+
+
 def _check(resp: requests.Response, operation: str) -> None:
-    """Raise ``FirestoreError`` on any 4xx/5xx response, including the
-    status code and body so the CLI can render a useful one-line error
-    instead of letting ``requests.HTTPError`` propagate as a traceback."""
+    """Raise ``FirestoreError`` on any 4xx/5xx response, unwrapping the
+    Firebase error envelope so the CLI can render a useful one-line
+    error instead of letting ``requests.HTTPError`` propagate."""
     if resp.status_code >= 400:
         raise FirestoreError(
-            f"{operation} failed ({resp.status_code}): {resp.text}"
+            f"{operation} failed ({resp.status_code}): "
+            f"{_extract_error_message(resp)}"
         )
 
 
@@ -382,7 +406,7 @@ class FirestoreClient:
         if resp.status_code >= 400:
             raise FirestoreError(
                 f"commit failed ({resp.status_code}) for "
-                f"{full_path}: {resp.text}"
+                f"{full_path}: {_extract_error_message(resp)}"
             )
         return doc_id
 
@@ -498,7 +522,7 @@ class FirestoreClient:
         if resp.status_code >= 400:
             raise FirestoreError(
                 f"Upload failed ({resp.status_code}) for "
-                f"{storage_path}: {resp.text}"
+                f"{storage_path}: {_extract_error_message(resp)}"
             )
         return storage_path
 

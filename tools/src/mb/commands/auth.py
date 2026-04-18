@@ -264,9 +264,9 @@ def delete_account(ctx: click.Context, email: str, yes: bool) -> None:
     ``users/{uid}/profile.jpg`` (both best-effort).
     """
     alias = ctx.obj["project_alias"]
-    if alias != "dev":
+    if alias not in ("dev", "emu"):
         raise click.UsageError(
-            f"auth delete is only available against --project dev "
+            f"auth delete is only available against --project dev or emu "
             f"(got {alias!r}). Use the Firebase console for prod."
         )
     config: ProjectConfig = ctx.obj["config"]
