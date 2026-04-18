@@ -188,8 +188,9 @@ def delete_account(ctx: click.Context, email: str, yes: bool) -> None:
       - Co-parented  → child is left intact; the operator is shown
         which children survived and which other UIDs parent them.
 
-    Storage objects under children/{id}/ are NOT cleaned up — they
-    orphan in the bucket. Acceptable for dev cleanup.
+    Storage cleanup is handled server-side: ``onChildDelete`` deletes
+    ``children/{id}/profile.jpg`` and ``onUserDeleted`` deletes
+    ``users/{uid}/profile.jpg`` (both best-effort).
     """
     alias = ctx.obj["project_alias"]
     if alias != "dev":
