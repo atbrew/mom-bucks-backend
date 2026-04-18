@@ -88,11 +88,15 @@ class AdminClient:
 
     def __init__(self, project_id: str, credentials_path: str | None = None):
         self.project_id = project_id
-        if credentials_path:
-            cred: credentials.Base = credentials.Certificate(credentials_path)
-        elif os.environ.get("FIREBASE_AUTH_EMULATOR_HOST"):
+        cred: credentials.Base
+        if os.environ.get("FIREBASE_AUTH_EMULATOR_HOST"):
             # Emulator mode — skip ADC entirely. See _EmulatorCredential.
+            # Checked first so `mb --project emu` keeps its "no credentials
+            # needed" promise even when GOOGLE_APPLICATION_CREDENTIALS is
+            # set globally in the shell for other commands.
             cred = _EmulatorCredential()
+        elif credentials_path:
+            cred = credentials.Certificate(credentials_path)
         else:
             cred = credentials.ApplicationDefault()
         self.app = firebase_admin.initialize_app(
