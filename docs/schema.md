@@ -44,6 +44,7 @@ rules can do `request.auth.uid == uid` without a lookup.
 | `email`       | `string`         | Mirrors Firebase Auth, denormalised here. |
 | `photoUrl`    | `string \| null` | Path in Storage or null.                  |
 | `fcmTokens`   | `string[]`       | Device push tokens for FCM fan-out.       |
+| `timezone`    | `string`         | IANA timezone (e.g. `Europe/Dublin`, `America/New_York`). Drives civil-date boundaries for activity schedules — `claimActivity`, `createActivity`, and `updateActivity` read the acting parent's timezone to compute `nextClaimAt`. Defaults to `Europe/Dublin` on user create. |
 | `createdAt`   | `Timestamp`      | Server timestamp at user creation.        |
 
 **Ownership:** A user doc is created on first sign-in. The owning user
@@ -60,10 +61,9 @@ single `array-contains` query can power the home screen for any parent.
 | `dateOfBirth`     | `Timestamp`             | **Required, editable.** Child's calendar date of birth. Mirrors Flask's `Child.date_of_birth` (`db.Date, nullable=False`). Stored as a `timestamp` but semantically a day — callers should ignore the time-of-day component. `firestore.rules` enforces `is timestamp` on both create and update, so parents can fix typos post-create but cannot strip the field or retype it to a non-timestamp. |
 | `createdAt`       | `Timestamp`             | **Required and immutable.** Instant the child record was created. On the client path, `firestore.rules` forces `createdAt == request.time` — clients must write `serverTimestamp()`, they cannot choose or backdate it. On the backfill path, the Admin SDK carries the Postgres `created_at` through verbatim so historical creation order survives the migration. Any update that touches this field is refused. |
 | `photoUrl`        | `string \| null`        | Path in Storage.                                                                                                     |
-| `balance`         | `integer`               | Spendable balance **in cents** (e.g. `1250` = €12.50). See "Monetary values" below. Maintained by `onTransactionCreate` (#15). |
-| `vaultBalance`    | `integer`               | Locked / saving balance **in cents**.                                                                                |
-| `activeCardId`    | `string \| null`        | Currently active reward card / activity.                                                                             |
-| `allowanceConfig` | `object`                | `{ amount: integer (cents), cadence: 'WEEKLY' \| 'MONTHLY', dayOfWeek: 0..6, ... }`. Drives `sendHabitNotifications` (#17). |
+| `balance`         | `integer`               | Spendable balance **in cents** (e.g. `1250` = €12.50). See "Monetary values" below. Maintained by `onTransactionCreate` (#15) and by the activity/vault callables. |
+| `allowanceId`     | `string \| null`        | ID of the child's single allowance activity, or `null`. Enforces "at most one ALLOWANCE activity per child" — set atomically inside `createActivity` when creating an `ALLOWANCE`; cleared inside `deleteActivity`. Clients cannot write this field directly (rules pin it to Admin-SDK writes). |
+| `vault`           | `map \| null`           | Nested vault map; `null` until configured. Shape: `{ balance: integer, target: integer, unlockedAt: Timestamp \| null, interest: { weeklyRate: number, lastAccrualWrite: Timestamp } \| null, matching: { rate: number } \| null }`. `interest` and `matching` are independently optional. Clients cannot write this map directly — all mutations flow through vault callables (`depositToVault`, `claimInterest`, `unlockVault`) and `mb vault configure` (Admin SDK). See "Vault state machine" below. |
 | `parentUids`      | `string[]`              | **The only relationship that matters.** UIDs allowed to read/write this child and its subcollections.               |
 | `createdByUid`    | `string`                | **Required and immutable.** UID of the parent who created the child. On create, `firestore.rules` enforces `createdByUid == request.auth.uid` so a client cannot forge it. On update, it is pinned so a parent cannot rewrite history and reassign "creator" after the fact. Audit only — does not grant any extra privilege. |
 | `lastTxnAt`       | `Timestamp \| null`     | Updated by `onTransactionCreate` (#15).                                                                              |
@@ -88,7 +88,7 @@ row. `firestore.rules` pins all three as immutable on update (plus
 | Field         | Type                                  | Notes                                                |
 |---------------|---------------------------------------|------------------------------------------------------|
 | `amount`      | `integer`                             | Always positive, **in cents** (e.g. `500` = €5.00). **Immutable after create** — any update that touches it is refused. |
-| `type`        | `'LODGE' \| 'WITHDRAW'`               | Direction of the transaction. **Immutable after create** — rules refuse a post-create flip, which would re-sign the row against `child.balance`. |
+| `type`        | `'LODGE' \| 'WITHDRAW' \| 'EARN'`     | Direction of the transaction. `LODGE` (parent adds money) and `EARN` (activity claim or vault unlock payout) both increment `child.balance`; `WITHDRAW` decrements it. **Immutable after create** — rules refuse a post-create flip, which would re-sign the row against `child.balance`. |
 | `description` | `string`                              | Free-text reason. Mutable — parents can correct typos or tag rows after the fact. |
 | `createdAt`   | `Timestamp`                           | **Required and immutable.** On the client path, `firestore.rules` forces `createdAt == request.time` — clients must write `serverTimestamp()`, they cannot choose or backdate it. On the backfill path, the Admin SDK carries the Postgres `created_at` through verbatim. Any update that touches this field is refused so the ledger audit trail cannot be silently re-stamped. |
 | `createdByUid`| `string`                              | UID of the parent who logged it. **Immutable after create** — audit-only field, rewriting it would forge the trail. |
@@ -99,7 +99,7 @@ Triggers: `onTransactionCreate` (#15) recomputes `child.balance`.
 
 Like the main transactions ledger, vault rows are **write-once by
 design**. `amount` and `type` are pinned immutable on update because
-they drive `vaultBalance`, interest accrual, and unlock timing — any
+they drive `vault.balance`, interest accrual, and unlock timing — any
 post-create mutation would silently re-sign the row against every
 derived state. Unlike `transactions`, vault rows have no
 `createdByUid` field (the vault ledger is driven by the parent who
@@ -109,31 +109,36 @@ authorship).
 | Field         | Type                                                      | Notes                                                                                                                                                                                                                                                                                                                                                                                 |
 |---------------|-----------------------------------------------------------|---------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------|
 | `amount`      | `integer`                                                 | Positive, **in cents**. `firestore.rules` enforces `amount is number && amount >= 0` on create; on update, the field is pinned immutable so derived balances cannot silently drift. |
-| `type`        | `'DEPOSIT' \| 'UNLOCK' \| 'INTEREST_CLAIM' \| 'MATCH'`   | Vault event kind. Mirrors Flask's `VaultTransaction` type enum. `firestore.rules` enforces the enum on create (rejecting any other string, including the main-ledger `WITHDRAW`); on update, the field is pinned immutable so a row's sign against `vaultBalance` cannot be flipped after the fact. |
+| `type`        | `'DEPOSIT' \| 'UNLOCK' \| 'INTEREST_CLAIM' \| 'MATCH'`   | Vault event kind. Mirrors Flask's `VaultTransaction` type enum. `firestore.rules` enforces the enum on create (rejecting any other string, including the main-ledger `WITHDRAW`); on update, the field is pinned immutable so a row's sign against `vault.balance` cannot be flipped after the fact. |
 | `description` | `string`                                                  | Free-text reason (e.g. "weekly interest", "goal unlocked"). Mutable — parents can correct typos. |
 | `createdAt`   | `Timestamp`                                               | **Required and immutable.** Same contract as `transactions.createdAt`: clients must write `serverTimestamp()` (rules pin it to `request.time`), the backfill carries Postgres `created_at` through verbatim, and updates cannot touch the field. Vault ledger drives interest + unlocks, so forged creation timestamps would corrupt those derivations. |
 | `unlockAt`    | `Timestamp \| null`                                       | Time-locked savings; null = unlocked.                                                                                                                                                                                                                                                                                                                                                 |
 
 #### `children/{childId}/activities/{activityId}`
 
-Mirrors the Postgres `activities` table (allowances, recurring
-bounties, vault interest) after backfill. The lifecycle is
-deliberately two-state (`LOCKED → READY`): a pending activity sits
-`LOCKED` until it's due, flips to `READY`, and on claim either
-recycles back to `LOCKED` at its next due date (recurring) or is
-deleted outright (one-off). See `functions/src/backfill/transform.ts`
-for the authoritative mapping and `functions/src/handlers/sendChildPush.ts`
-for the push-fan-out trigger.
+Schedule-driven, single-state model. An activity is claimable iff
+`nextClaimAt <= now` in the acting parent's timezone — there is no
+`status` field, no scheduled function to flip state, and no
+post-claim bookkeeping beyond advancing `nextClaimAt`. See
+`/Users/atbrew/Development/mom-bucks-backend/docs/specs/2026-04-18-activities-refresh/design.md`
+for the full rationale.
 
-| Field       | Type                                           | Notes                                                       |
-|-------------|------------------------------------------------|-------------------------------------------------------------|
-| `title`     | `string`                                       | Activity / chore name (mapped from Flask `description`).    |
-| `reward`    | `integer`                                      | Amount paid out on claim, **in cents**.                     |
-| `type`      | `'ALLOWANCE' \| 'BOUNTY_RECURRING' \| 'INTEREST'` | Kind of activity; maps from Flask `card_type`.          |
-| `status`    | `'LOCKED' \| 'READY'`                          | Drives `onActivityPush` (#18) on `LOCKED → READY`.          |
-| `dueDate`   | `Timestamp`                                    | When the activity becomes claimable.                        |
-| `claimedAt` | `Timestamp \| null`                            | Set when claimed; cleared on recycle.                       |
-| `createdAt` | `Timestamp`                                    |                                                             |
+All activity writes flow through callables (`createActivity`,
+`updateActivity`, `deleteActivity`, `claimActivity`). Direct client
+writes are denied by rules — the `nextClaimAt` recompute and the
+`children.allowanceId` pointer update have to happen atomically with
+the activity-doc write, which only a callable transaction can
+guarantee.
+
+| Field           | Type                         | Notes                                                       |
+|-----------------|------------------------------|-------------------------------------------------------------|
+| `title`         | `string`                     | Activity / chore name.                                      |
+| `reward`        | `integer`                    | Amount paid out on claim, **in cents**.                     |
+| `type`          | `'ALLOWANCE' \| 'CHORE'`     | Cosmetic for UI grouping. **Immutable post-create** — flipping at runtime would require atomic pointer rewiring we don't need to build. Uniqueness of `ALLOWANCE` is enforced by `children.allowanceId`, not by this field. |
+| `schedule`      | `map`                        | Recurrence rule. One of: `{ kind: 'DAILY' }`, `{ kind: 'WEEKLY', dayOfWeek: 0..6 }` (0 = Sun, 6 = Sat), `{ kind: 'MONTHLY', dayOfMonth: 1..31 }` (clamped to month length for shorter months). |
+| `nextClaimAt`   | `Timestamp`                  | When next claimable. Claimable iff `<= now`. Stamped to `now` on create (immediately claimable), advanced by `claimActivity` and recomputed on `schedule` edits. |
+| `lastClaimedAt` | `Timestamp \| null`          | Set on each claim; purely historical.                       |
+| `createdAt`     | `Timestamp`                  | Server-stamped on create.                                   |
 
 ### `invites/{token}`
 
@@ -262,12 +267,23 @@ Full rules live in `firestore.rules`. The model in plain English:
   `parentUids` (no creating a child you can't access). `parentUids`
   itself can only be mutated by the `acceptInvite` (#13) and
   `removeParentFromChildren` (#14) callables — clients cannot edit it
-  directly.
-- `children/{childId}/{transactions|vaultTransactions|activities}/**` —
+  directly. The `allowanceId` field and the whole `vault` map are
+  similarly pinned: rules deny any client-driven change, so the only
+  way they move is through the Admin-SDK callables that own them
+  (`createActivity` / `deleteActivity` for `allowanceId`;
+  `depositToVault` / `claimInterest` / `unlockVault` / `mb vault
+  configure` for `vault`).
+- `children/{childId}/{transactions|vaultTransactions}/**` —
   read/write if the caller is in the parent child's `parentUids`. The
   rule does a `get(/databases/.../children/$(childId)).data.parentUids`
   lookup. That's an extra read per query, but listeners only re-fire on
   changes, so this stays cheap at our scale.
+- `children/{childId}/activities/**` — **read** only from rules; all
+  writes (create / update / delete) are denied for direct clients and
+  must flow through the activity callables. The callables enforce
+  `children.allowanceId` uniqueness and recompute `nextClaimAt`
+  atomically with the activity-doc write, which is what the
+  deny-direct-writes posture protects.
 - `children/{childId}/transactions/**` additionally enforces two
   guards on create: (a) `amount` must be a non-negative number
   (shape check — without it, a client could send a negative-amount
