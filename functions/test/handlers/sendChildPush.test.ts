@@ -1,6 +1,6 @@
 import { describe, expect, it } from "vitest";
 import {
-  buildActivityPush,
+  buildActivityCreatePush,
   buildTransactionPush,
   formatCents,
 } from "../../src/handlers/sendChildPush";
@@ -82,72 +82,59 @@ describe("buildTransactionPush", () => {
   });
 });
 
-describe("buildActivityPush", () => {
+describe("buildActivityCreatePush", () => {
   const child = { name: "Sam", parentUids: ["fb-alice"] };
 
-  it("fires on a LOCKED → READY transition", () => {
-    const payload = buildActivityPush(
-      "c-sam",
-      child,
-      { status: "LOCKED", title: "Take out the bins", reward: 200 },
-      { status: "READY", title: "Take out the bins", reward: 200 },
-    );
+  it("fires on a fresh create with reward", () => {
+    const payload = buildActivityCreatePush("c-sam", child, {
+      title: "Take out the bins",
+      reward: 200,
+    });
     expect(payload).toEqual({
-      kind: "ACTIVITY_READY",
+      kind: "ACTIVITY_CREATED",
       childId: "c-sam",
       title: "Sam unlocked €2.00",
       body: "Take out the bins",
     });
   });
 
-  it("fires on a fresh create that lands in READY (before === null)", () => {
-    const payload = buildActivityPush(
-      "c-sam",
-      child,
-      null,
-      { status: "READY", title: "Homework", reward: 100 },
-    );
-    expect(payload?.kind).toBe("ACTIVITY_READY");
-    expect(payload?.title).toBe("Sam unlocked €1.00");
+  it("falls back to a generic title when reward is missing", () => {
+    const payload = buildActivityCreatePush("c-sam", child, {
+      title: "chore",
+    });
+    expect(payload?.title).toBe("Sam — new activity");
   });
 
-  it("does NOT fire on LOCKED → LOCKED (noop update)", () => {
-    const payload = buildActivityPush(
-      "c-sam",
-      child,
-      { status: "LOCKED", title: "chore" },
-      { status: "LOCKED", title: "chore" },
-    );
-    expect(payload).toBeNull();
+  it("falls back to description when title is empty", () => {
+    const payload = buildActivityCreatePush("c-sam", child, {
+      title: "",
+      description: "helping in the garden",
+      reward: 100,
+    });
+    expect(payload?.body).toBe("helping in the garden");
   });
 
-  it("does NOT fire on READY → READY (second edit of an already-ready activity)", () => {
-    const payload = buildActivityPush(
-      "c-sam",
-      child,
-      { status: "READY", title: "chore" },
-      { status: "READY", title: "chore (edited)" },
-    );
-    expect(payload).toBeNull();
+  it("falls back to a generic body when title and description are empty", () => {
+    const payload = buildActivityCreatePush("c-sam", child, { reward: 100 });
+    expect(payload?.body).toBe("Tap to review.");
   });
 
-  it("does NOT fire on deletion (after === null)", () => {
-    const payload = buildActivityPush(
+  it("falls back to 'your child' when the child doc has no name", () => {
+    const payload = buildActivityCreatePush(
       "c-sam",
-      child,
-      { status: "READY", title: "chore" },
-      null,
+      { parentUids: [] },
+      { title: "chore", reward: 100 },
     );
-    expect(payload).toBeNull();
+    expect(payload?.title).toBe("your child unlocked €1.00");
   });
 
-  it("handles a missing reward gracefully", () => {
-    const payload = buildActivityPush(
-      "c-sam",
-      child,
-      { status: "LOCKED", title: "chore" },
-      { status: "READY", title: "chore" },
-    );
-    expect(payload?.title).toBe("Sam — activity ready");
+  it("returns null when child is missing", () => {
+    expect(
+      buildActivityCreatePush("c-sam", null, { title: "chore" }),
+    ).toBeNull();
+  });
+
+  it("returns null when activity is missing", () => {
+    expect(buildActivityCreatePush("c-sam", child, null)).toBeNull();
   });
 });

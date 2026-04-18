@@ -4,33 +4,27 @@
  * Real-time FCM push notifications when something interesting
  * happens on a child:
  *   - a new transaction is created (`LODGE` or `WITHDRAW`), OR
- *   - an activity transitions to `READY` (matching the source
- *     schema's `LOCKED → READY` lifecycle).
+ *   - a new activity is created.
  *
  * Replaces the Flask-side inline FCM fan-out. With this trigger in
  * place, the Flask request/response path no longer has to block on
  * push delivery.
  *
+ * Activities changed shape in the activities/vault refresh (slice 2):
+ * the old `status: 'LOCKED' | 'READY'` lifecycle went away, so the
+ * previous `onActivityPush` onWrite trigger (which fired on the
+ * LOCKED→READY edge) is retired in favour of `onActivityCreate`,
+ * which fires on doc creation. A fresh activity lands with
+ * `nextClaimAt = now`, i.e. immediately claimable, so "create" is
+ * the right moment to notify.
+ *
  * LOOP GUARD: the trigger MUST NOT write back to the same docs it
  * observes. If we ever want to record "notification sent" metadata,
  * use a disjoint path like `children/{childId}/_meta/lastPushAt`
- * so we don't re-enter onWrite infinitely.
- *
- * Structure:
- *   - `buildTransactionPush(child, txn)` — pure, returns an FCM
- *     notification body or `null` to skip.
- *   - `buildActivityPush(child, before, after)` — pure, returns a
- *     body only on `LOCKED → READY` transitions, null otherwise.
- *   - `onTransactionPush`, `onActivityPush` — the thin Firestore
- *     trigger wrappers. They delegate to the shared
- *     `fanOutToParents` helper (`./fanOutToParents.ts`), which also
- *     backs `sendHabitNotifications`.
+ * so we don't re-enter onCreate infinitely.
  */
 
-import {
-  onDocumentCreated,
-  onDocumentWritten,
-} from "firebase-functions/v2/firestore";
+import { onDocumentCreated } from "firebase-functions/v2/firestore";
 import { logger } from "firebase-functions";
 import { getFirestore } from "../admin";
 import { fanOutToParents } from "./fanOutToParents";
@@ -53,13 +47,12 @@ interface ActivityDoc {
   title?: string;
   description?: string;
   reward?: number; // integer cents
-  status: "LOCKED" | "READY";
 }
 
 export interface PushPayload {
   title: string;
   body: string;
-  kind: "TRANSACTION" | "ACTIVITY_READY";
+  kind: "TRANSACTION" | "ACTIVITY_CREATED";
   childId: string;
 }
 
@@ -106,28 +99,24 @@ export function buildTransactionPush(
   return null;
 }
 
-export function buildActivityPush(
+export function buildActivityCreatePush(
   childId: string,
   child: ChildDoc | null,
-  before: ActivityDoc | null,
-  after: ActivityDoc | null,
+  activity: ActivityDoc | null,
 ): PushPayload | null {
-  if (!child || !after) return null;
-  // Only push on the LOCKED → READY transition. A fresh create
-  // that lands in READY (before === null) also counts.
-  const wasLocked = !before || before.status === "LOCKED";
-  if (!wasLocked || after.status !== "READY") return null;
+  if (!child || !activity) return null;
 
   const childName = child.name ?? "your child";
-  const reward = typeof after.reward === "number" ? formatCents(after.reward) : null;
+  const reward =
+    typeof activity.reward === "number" ? formatCents(activity.reward) : null;
   const title = reward
     ? `${childName} unlocked ${reward}`
-    : `${childName} — activity ready`;
+    : `${childName} — new activity`;
   return {
-    kind: "ACTIVITY_READY",
+    kind: "ACTIVITY_CREATED",
     childId,
     title,
-    body: after.title || after.description || "Tap to review.",
+    body: activity.title || activity.description || "Tap to review.",
   };
 }
 
@@ -159,33 +148,28 @@ export const onTransactionPush = onDocumentCreated(
   },
 );
 
-export const onActivityPush = onDocumentWritten(
+export const onActivityCreate = onDocumentCreated(
   {
     document: "children/{childId}/activities/{activityId}",
     region: "us-central1",
   },
   async (event) => {
     const childId = event.params.childId;
-    const before = event.data?.before?.exists
-      ? (event.data.before.data() as ActivityDoc)
-      : null;
-    const after = event.data?.after?.exists
-      ? (event.data.after.data() as ActivityDoc)
-      : null;
-    if (!after) return;
+    const activity = event.data?.data() as ActivityDoc | undefined;
+    if (!activity) return;
 
     const db = getFirestore();
     const childSnap = await db.doc(`children/${childId}`).get();
     const child = childSnap.exists ? (childSnap.data() as ChildDoc) : null;
     if (!child) {
-      logger.warn("[onActivityPush] child missing", { childId });
+      logger.warn("[onActivityCreate] child missing", { childId });
       return;
     }
 
-    const payload = buildActivityPush(childId, child, before, after);
+    const payload = buildActivityCreatePush(childId, child, activity);
     if (!payload) return;
 
     const result = await fanOutToParents(db, child.parentUids ?? [], payload);
-    logger.info("[onActivityPush] fan-out complete", { childId, ...result });
+    logger.info("[onActivityCreate] fan-out complete", { childId, ...result });
   },
 );
