@@ -558,8 +558,8 @@ now).
   allowed for parents. Map-shape validation:
   - When `vault != null`: `balance`, `target` are required integers;
     `interest` is either `null` or a map with `weeklyRate` (number)
-    and `lastClaimAt` (Timestamp); `matching` is either `null` or a
-    map with `rate` (number).
+    and `lastAccrualWrite` (Timestamp); `matching` is either `null`
+    or a map with `rate` (number).
   - The legacy flat `vaultBalance` field is removed in these rules.
 
 Rules tests (`functions/test/rules/firestore.rules.test.ts`) need
