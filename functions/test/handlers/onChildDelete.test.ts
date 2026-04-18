@@ -87,13 +87,35 @@ const subcollectionDocs: Record<string, string[]> = {
   "children/child-1/activities": [],
 };
 
+// Invite query mock — `collection("invites").where(...).get()`
+const mockInviteWhereGet = vi.fn().mockResolvedValue({ empty: true, docs: [], size: 0 });
+const mockInviteWhere = vi.fn().mockReturnValue({ get: mockInviteWhereGet });
+
+// Invite BulkWriter (separate from subcollection BulkWriter)
+const mockInviteBulkWriterDelete = vi.fn();
+const mockInviteBulkWriterClose = vi.fn().mockResolvedValue(undefined);
+
+// Track bulkWriter call count so we can return different instances
+let bulkWriterCallCount = 0;
+
 const mockCollection = vi.fn().mockImplementation((path: string) => {
+  if (path === "invites") {
+    return { where: mockInviteWhere };
+  }
   return mockCollectionWithDocs(subcollectionDocs[path] ?? []);
 });
 
 vi.mock("../../src/admin", () => ({
   getFirestore: () => ({
-    bulkWriter: () => mockBulkWriter,
+    bulkWriter: () => {
+      bulkWriterCallCount++;
+      // First call is for subcollection cleanup, second for invites
+      if (bulkWriterCallCount === 1) return mockBulkWriter;
+      return {
+        delete: mockInviteBulkWriterDelete,
+        close: mockInviteBulkWriterClose,
+      };
+    },
     collection: mockCollection,
   }),
   getStorage: () => ({
@@ -112,6 +134,7 @@ import { onChildDelete } from "../../src/handlers/onChildDelete";
 describe("onChildDelete", () => {
   beforeEach(() => {
     vi.clearAllMocks();
+    bulkWriterCallCount = 0;
     // Reset subcollection call counts
     subcollectionDocs["children/child-1/transactions"] = ["children/child-1/transactions/t1"];
     subcollectionDocs["children/child-1/vaultTransactions"] = ["children/child-1/vaultTransactions/v1"];
@@ -151,6 +174,40 @@ describe("onChildDelete", () => {
     ).resolves.not.toThrow();
 
     // Subcollection cleanup should still have happened
+    expect(mockClose).toHaveBeenCalledTimes(1);
+  });
+
+  it("deletes orphaned invites where childId matches", async () => {
+    const fakeInviteDoc = { ref: { path: "invites/token1" } };
+    mockInviteWhereGet.mockResolvedValueOnce({
+      empty: false,
+      docs: [fakeInviteDoc],
+      size: 1,
+    });
+
+    await (onChildDelete as (event: unknown) => Promise<void>)(fakeEvent);
+
+    expect(mockInviteWhere).toHaveBeenCalledWith("childId", "==", "child-1");
+    expect(mockInviteBulkWriterDelete).toHaveBeenCalledWith(fakeInviteDoc.ref);
+    expect(mockInviteBulkWriterClose).toHaveBeenCalled();
+  });
+
+  it("skips invite cleanup when no orphaned invites exist", async () => {
+    mockInviteWhereGet.mockResolvedValueOnce({ empty: true, docs: [], size: 0 });
+
+    await (onChildDelete as (event: unknown) => Promise<void>)(fakeEvent);
+
+    expect(mockInviteBulkWriterDelete).not.toHaveBeenCalled();
+  });
+
+  it("survives invite cleanup failure without crashing", async () => {
+    mockInviteWhereGet.mockRejectedValueOnce(new Error("Firestore unavailable"));
+
+    await expect(
+      (onChildDelete as (event: unknown) => Promise<void>)(fakeEvent),
+    ).resolves.not.toThrow();
+
+    // Subcollection + storage cleanup should still have happened
     expect(mockClose).toHaveBeenCalledTimes(1);
   });
 });

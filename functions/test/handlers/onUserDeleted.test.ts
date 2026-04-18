@@ -17,7 +17,16 @@ import { describe, expect, it, vi, beforeEach } from "vitest";
 
 // vi.hoisted runs before vi.mock hoisting, so the holder is available
 // when the mock factory captures the onDelete handler.
-const { holder, mockStorageDelete, mockStorageFile, mockBucket } = vi.hoisted(() => {
+const {
+  holder,
+  mockStorageDelete,
+  mockStorageFile,
+  mockBucket,
+  mockBulkWriterDelete,
+  mockBulkWriterClose,
+  mockWhereGet,
+  mockWhere,
+} = vi.hoisted(() => {
   const _holder: { handler: ((user: unknown) => Promise<void>) | null } = {
     handler: null,
   };
@@ -28,11 +37,19 @@ const { holder, mockStorageDelete, mockStorageFile, mockBucket } = vi.hoisted(()
   const _mockBucket = vi.fn().mockReturnValue({
     file: _mockStorageFile,
   });
+  const _mockBulkWriterDelete = vi.fn();
+  const _mockBulkWriterClose = vi.fn().mockResolvedValue(undefined);
+  const _mockWhereGet = vi.fn().mockResolvedValue({ empty: true, docs: [], size: 0 });
+  const _mockWhere = vi.fn().mockReturnValue({ get: _mockWhereGet });
   return {
     holder: _holder,
     mockStorageDelete: _mockStorageDelete,
     mockStorageFile: _mockStorageFile,
     mockBucket: _mockBucket,
+    mockBulkWriterDelete: _mockBulkWriterDelete,
+    mockBulkWriterClose: _mockBulkWriterClose,
+    mockWhereGet: _mockWhereGet,
+    mockWhere: _mockWhere,
   };
 });
 
@@ -60,6 +77,13 @@ vi.mock("firebase-functions", () => ({
 vi.mock("../../src/admin", () => ({
   getStorage: () => ({
     bucket: mockBucket,
+  }),
+  getFirestore: () => ({
+    collection: vi.fn().mockReturnValue({ where: mockWhere }),
+    bulkWriter: vi.fn().mockReturnValue({
+      delete: mockBulkWriterDelete,
+      close: mockBulkWriterClose,
+    }),
   }),
 }));
 
@@ -114,5 +138,34 @@ describe("onUserDeleted handler", () => {
     await holder.handler!(null);
 
     expect(mockStorageFile).not.toHaveBeenCalled();
+  });
+
+  it("deletes orphaned invites where invitedByUid matches", async () => {
+    const fakeDoc = { ref: { path: "invites/token1" } };
+    mockWhereGet.mockResolvedValueOnce({
+      empty: false,
+      docs: [fakeDoc],
+      size: 1,
+    });
+
+    await holder.handler!({ uid: "u3" });
+
+    expect(mockWhere).toHaveBeenCalledWith("invitedByUid", "==", "u3");
+    expect(mockBulkWriterDelete).toHaveBeenCalledWith(fakeDoc.ref);
+    expect(mockBulkWriterClose).toHaveBeenCalled();
+  });
+
+  it("skips invite cleanup when no orphaned invites exist", async () => {
+    mockWhereGet.mockResolvedValueOnce({ empty: true, docs: [], size: 0 });
+
+    await holder.handler!({ uid: "u4" });
+
+    expect(mockBulkWriterDelete).not.toHaveBeenCalled();
+  });
+
+  it("survives invite cleanup failure without crashing", async () => {
+    mockWhereGet.mockRejectedValueOnce(new Error("Firestore unavailable"));
+
+    await expect(holder.handler!({ uid: "u5" })).resolves.not.toThrow();
   });
 });

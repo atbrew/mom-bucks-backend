@@ -82,6 +82,33 @@ export const onChildDelete = onDocumentDeleted(
       });
     }
 
+    // Orphaned invites cleanup (best-effort).
+    // Delete all invites where childId matches — these reference a
+    // child that no longer exists and are meaningless to keep.
+    try {
+      const snap = await db
+        .collection("invites")
+        .where("childId", "==", childId)
+        .get();
+
+      if (!snap.empty) {
+        const inviteBulkWriter = db.bulkWriter();
+        for (const doc of snap.docs) {
+          void inviteBulkWriter.delete(doc.ref);
+        }
+        await inviteBulkWriter.close();
+        logger.info("[onChildDelete] orphaned invites deleted", {
+          childId,
+          count: snap.size,
+        });
+      }
+    } catch (err) {
+      logger.warn("[onChildDelete] invite cleanup failed", {
+        childId,
+        error: (err as Error).message,
+      });
+    }
+
     logger.info("[onChildDelete] cascade complete", {
       childId,
       subcollectionDocs,

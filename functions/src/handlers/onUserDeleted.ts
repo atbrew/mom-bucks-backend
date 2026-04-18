@@ -2,12 +2,13 @@
  * onUserDeleted — Auth event trigger (v1 API).
  *
  * Fires asynchronously when a Firebase Auth user is deleted (any
- * method: Admin SDK, Firebase console, or Auth REST API). Cleans
- * up the user's profile image from Storage at `users/{uid}/profile.jpg`.
+ * method: Admin SDK, Firebase console, or Auth REST API). Cleans up:
  *
- * This is the user-side complement to `onChildDelete`, which handles
- * `children/{childId}/profile.jpg`. Without this trigger, deleting a
- * user account leaves an orphaned Storage object that accrues cost
+ *   1. Profile image at `users/{uid}/profile.jpg` (Storage).
+ *   2. Invites sent by this user (`invites` where `invitedByUid == uid`).
+ *
+ * Without this trigger, deleting a user account leaves orphaned
+ * Storage objects and dangling invite docs that accumulate
  * indefinitely.
  *
  * Uses the v1 `auth.user().onDelete()` API because firebase-functions
@@ -16,14 +17,13 @@
  * onDelete fires post-deletion (non-blocking), which is exactly what
  * we need for best-effort cleanup.
  *
- * Storage deletion is best-effort: if the file doesn't exist or the
- * Storage API hiccups, we log a warning but don't fail the trigger.
- * Same pattern as `onChildDelete`.
+ * All cleanup is best-effort: failures are logged but don't crash the
+ * trigger. Same pattern as `onChildDelete`.
  */
 
 import * as functions from "firebase-functions/v1";
 import { logger } from "firebase-functions";
-import { getStorage } from "../admin";
+import { getFirestore, getStorage } from "../admin";
 
 // ─── Pure logic ──────────────────────────────────────────────────────
 
@@ -58,6 +58,7 @@ export const onUserDeleted = functions
       return;
     }
 
+    // 1. Profile image cleanup (Storage, best-effort).
     try {
       const bucket = getStorage().bucket();
       await bucket.file(plan.storagePath).delete({ ignoreNotFound: true });
@@ -67,6 +68,34 @@ export const onUserDeleted = functions
       });
     } catch (err) {
       logger.warn("[onUserDeleted] profile image cleanup failed", {
+        uid: user.uid,
+        error: (err as Error).message,
+      });
+    }
+
+    // 2. Orphaned invites cleanup (Firestore, best-effort).
+    //    Delete all invites where invitedByUid == uid — these are
+    //    dangling now that the sender no longer exists.
+    try {
+      const db = getFirestore();
+      const snap = await db
+        .collection("invites")
+        .where("invitedByUid", "==", user.uid)
+        .get();
+
+      if (!snap.empty) {
+        const bulkWriter = db.bulkWriter();
+        for (const doc of snap.docs) {
+          void bulkWriter.delete(doc.ref);
+        }
+        await bulkWriter.close();
+        logger.info("[onUserDeleted] orphaned invites deleted", {
+          uid: user.uid,
+          count: snap.size,
+        });
+      }
+    } catch (err) {
+      logger.warn("[onUserDeleted] invite cleanup failed", {
         uid: user.uid,
         error: (err as Error).message,
       });
