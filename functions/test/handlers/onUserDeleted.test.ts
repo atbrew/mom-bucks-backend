@@ -83,16 +83,16 @@ vi.mock("../../src/admin", () => ({
     bulkWriter: vi.fn().mockReturnValue({
       delete: mockBulkWriterDelete,
       close: mockBulkWriterClose,
+      onWriteError: vi.fn(),
     }),
   }),
 }));
 
 // ── Import after mocks ───────────────────────────────────────────────
 
+// This import evaluates the module, exposes the pure helper, and
+// triggers the mock chain that captures the registered handler.
 import { buildUserCleanupPlan } from "../../src/handlers/onUserDeleted";
-
-// Importing the module triggers the mock chain and captures the handler.
-import "../../src/handlers/onUserDeleted";
 
 // ── Pure logic tests ─────────────────────────────────────────────────
 

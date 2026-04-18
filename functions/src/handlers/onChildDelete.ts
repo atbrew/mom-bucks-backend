@@ -93,6 +93,15 @@ export const onChildDelete = onDocumentDeleted(
 
       if (!snap.empty) {
         const inviteBulkWriter = db.bulkWriter();
+        inviteBulkWriter.onWriteError((err) => {
+          logger.error("[onChildDelete] invite delete failed", {
+            childId,
+            path: err.documentRef.path,
+            code: err.code,
+            attempts: err.failedAttempts,
+          });
+          return err.failedAttempts < 5;
+        });
         for (const doc of snap.docs) {
           void inviteBulkWriter.delete(doc.ref);
         }

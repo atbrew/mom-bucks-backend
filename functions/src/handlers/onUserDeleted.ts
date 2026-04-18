@@ -69,7 +69,9 @@ export const onUserDeleted = functions
     } catch (err) {
       logger.warn("[onUserDeleted] profile image cleanup failed", {
         uid: user.uid,
-        error: (err as Error).message,
+        ...(err instanceof Error
+          ? { errorMessage: err.message, errorStack: err.stack }
+          : { error: String(err) }),
       });
     }
 
@@ -85,6 +87,15 @@ export const onUserDeleted = functions
 
       if (!snap.empty) {
         const bulkWriter = db.bulkWriter();
+        bulkWriter.onWriteError((err) => {
+          logger.error("[onUserDeleted] invite delete failed", {
+            uid: user.uid,
+            path: err.documentRef.path,
+            code: err.code,
+            attempts: err.failedAttempts,
+          });
+          return err.failedAttempts < 5;
+        });
         for (const doc of snap.docs) {
           void bulkWriter.delete(doc.ref);
         }
@@ -97,7 +108,9 @@ export const onUserDeleted = functions
     } catch (err) {
       logger.warn("[onUserDeleted] invite cleanup failed", {
         uid: user.uid,
-        error: (err as Error).message,
+        ...(err instanceof Error
+          ? { errorMessage: err.message, errorStack: err.stack }
+          : { error: String(err) }),
       });
     }
   });

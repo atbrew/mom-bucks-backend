@@ -94,6 +94,7 @@ const mockInviteWhere = vi.fn().mockReturnValue({ get: mockInviteWhereGet });
 // Invite BulkWriter (separate from subcollection BulkWriter)
 const mockInviteBulkWriterDelete = vi.fn();
 const mockInviteBulkWriterClose = vi.fn().mockResolvedValue(undefined);
+const mockInviteBulkWriterOnWriteError = vi.fn();
 
 // Track bulkWriter call count so we can return different instances
 let bulkWriterCallCount = 0;
@@ -114,6 +115,7 @@ vi.mock("../../src/admin", () => ({
       return {
         delete: mockInviteBulkWriterDelete,
         close: mockInviteBulkWriterClose,
+        onWriteError: mockInviteBulkWriterOnWriteError,
       };
     },
     collection: mockCollection,
@@ -135,7 +137,7 @@ describe("onChildDelete", () => {
   beforeEach(() => {
     vi.clearAllMocks();
     bulkWriterCallCount = 0;
-    // Reset subcollection call counts
+    // Reset subcollection fixture docs
     subcollectionDocs["children/child-1/transactions"] = ["children/child-1/transactions/t1"];
     subcollectionDocs["children/child-1/vaultTransactions"] = ["children/child-1/vaultTransactions/v1"];
     subcollectionDocs["children/child-1/activities"] = [];
