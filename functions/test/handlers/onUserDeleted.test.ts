@@ -131,8 +131,10 @@ vi.mock("../../src/admin", () => ({
 
 // ── Import after mocks ───────────────────────────────────────────────
 
-// This import evaluates the module, exposes the pure helper, and
-// triggers the mock chain that captures the registered handler.
+// A named import evaluates the entire module, running the module-level
+// `functions.region(...).auth.user().onDelete(fn)` call.  The mock for
+// firebase-functions/v1 intercepts that call and stores `fn` in
+// `holder.handler`, so tests can invoke it directly.
 import { buildUserCleanupPlan } from "../../src/handlers/onUserDeleted";
 
 // ── Pure logic tests ─────────────────────────────────────────────────
