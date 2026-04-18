@@ -132,9 +132,16 @@ Validation:
   the month has fewer days (e.g. `dayOfMonth: 31` in February), the
   next occurrence is clamped to that month's last day.
 
-Firestore rules enforce the shape on create. Schedule edits are
-**allowed** (via `updateActivity`, see §3.7) — changing a schedule
-triggers a recomputation of `nextClaimAt`.
+All activity writes go through the `createActivity` / `updateActivity`
+callables, which use the Admin SDK and therefore bypass Firestore
+rules. Shape validation is the **callable's** responsibility: both
+create and update must validate the schedule map (kind literal, day-of-*
+bounds, no extra keys) before writing. Firestore rules mirror the
+constraints as defence in depth and, more importantly, **deny direct
+client writes** to the activities collection entirely (§6). Schedule
+edits are **allowed** (via `updateActivity`, see §3.7) — after
+validation passes, changing a schedule triggers a recomputation of
+`nextClaimAt`.
 
 ### 3.3 Claim semantics
 
