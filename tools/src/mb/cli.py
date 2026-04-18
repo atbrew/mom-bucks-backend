@@ -10,7 +10,6 @@ Usage:
 from __future__ import annotations
 
 import click
-import firebase_admin.exceptions
 
 from .client import AuthError, FirestoreError, get_project_config
 from .commands.auth import auth_group
@@ -22,20 +21,18 @@ from .commands.smoke_test import smoke_test
 
 
 class MbGroup(click.Group):
-    """Click group that converts our domain errors and Firebase Admin
-    SDK errors into ``click.ClickException`` so they render as a
-    single-line error message instead of a Python traceback."""
+    """Click group that converts our domain errors into
+    ``click.ClickException`` so they render as a single-line error
+    message instead of a Python traceback. Admin SDK errors
+    (``ValueError`` from input validation, ``FirebaseError`` from the
+    backend) are translated to ``AuthError`` at the SDK boundary in
+    ``admin.py``, so the catch list here stays narrow — any other
+    ``Exception`` is a real bug and SHOULD surface as a traceback."""
 
     def invoke(self, ctx: click.Context):
         try:
             return super().invoke(ctx)
         except (AuthError, FirestoreError) as e:
-            raise click.ClickException(str(e)) from e
-        except (firebase_admin.exceptions.FirebaseError, ValueError) as e:
-            # Admin SDK input validation (e.g. malformed email) raises
-            # bare ValueError; runtime backend errors raise FirebaseError.
-            # Both are operator-actionable — render as a Click error
-            # line rather than a traceback.
             raise click.ClickException(str(e)) from e
 
 

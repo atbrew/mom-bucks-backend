@@ -337,12 +337,17 @@ def test_delete_account_reports_missing_user():
 
 def test_create_account_malformed_email_renders_cleanly():
     """Admin SDK's `validate_email` raises a bare ValueError for
-    garbage input (e.g. `--email …`). The CLI must render this as a
-    one-line Click error, not a 30-line Python traceback — otherwise
-    the operator can't see the actual problem in the noise."""
+    garbage input (e.g. `--email …`); ``AdminClient.create_user``
+    translates that to ``AuthError`` at the SDK boundary so the CLI's
+    top-level handler can render a one-line Click error instead of a
+    30-line Python traceback. We mock ``AuthError`` here because the
+    translation is the AdminClient's job — see
+    ``test_admin_client_create_user_translates_value_error`` for the
+    translation itself."""
+    from mb.client import AuthError
     runner = CliRunner()
     mock_admin = MagicMock()
-    mock_admin.create_user.side_effect = ValueError(
+    mock_admin.create_user.side_effect = AuthError(
         'Malformed email address string: "…".'
     )
 

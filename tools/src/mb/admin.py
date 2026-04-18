@@ -15,11 +15,34 @@ exercise the real auth + rules path.
 
 from __future__ import annotations
 
+from contextlib import contextmanager
+
 import firebase_admin
+import firebase_admin.exceptions
 from firebase_admin import auth, credentials, firestore
 from rich.console import Console
 
+from .client import AuthError
+
 console = Console()
+
+
+@contextmanager
+def _translate_admin_errors():
+    """Translate Admin SDK validation/runtime errors into ``AuthError``.
+
+    The Admin SDK signals input validation (e.g. malformed email) by
+    raising a bare ``ValueError`` and backend errors by raising
+    ``firebase_admin.exceptions.FirebaseError``. We narrow both into
+    ``AuthError`` at the SDK boundary so the CLI's top-level handler
+    can render a clean one-line error instead of a Python traceback,
+    without having to swallow ``ValueError`` globally (which would also
+    mask genuine logic bugs in command code).
+    """
+    try:
+        yield
+    except (ValueError, firebase_admin.exceptions.FirebaseError) as e:
+        raise AuthError(str(e)) from e
 
 # ─── Cleanup tracker ───────────────────────────────────────────────
 
@@ -66,12 +89,13 @@ class AdminClient:
         display_name: str,
     ) -> str:
         """Create a Firebase Auth user. Returns the UID."""
-        user = auth.create_user(
-            email=email,
-            password=password,
-            display_name=display_name,
-            app=self.app,
-        )
+        with _translate_admin_errors():
+            user = auth.create_user(
+                email=email,
+                password=password,
+                display_name=display_name,
+                app=self.app,
+            )
         self.tracker.add_user(user.uid)
         return user.uid
 
@@ -81,18 +105,26 @@ class AdminClient:
         Handles pagination via ``iterate_all()`` so callers get a flat
         list without dealing with page tokens.
         """
-        return list(auth.list_users(app=self.app).iterate_all())
+        with _translate_admin_errors():
+            return list(auth.list_users(app=self.app).iterate_all())
 
     def get_user_by_email(self, email: str):
         """Look up a user by email. Returns UserRecord or None."""
+        # UserNotFoundError is a normal-path signal (caller distinguishes
+        # "missing" from "error"), so it must be caught BEFORE the
+        # FirebaseError translation in _translate_admin_errors picks it up.
         try:
-            return auth.get_user_by_email(email, app=self.app)
-        except auth.UserNotFoundError:
-            return None
+            with _translate_admin_errors():
+                return auth.get_user_by_email(email, app=self.app)
+        except AuthError as e:
+            if isinstance(e.__cause__, auth.UserNotFoundError):
+                return None
+            raise
 
     def delete_user(self, uid: str) -> None:
         """Delete a Firebase Auth user. Raises on Admin SDK errors."""
-        auth.delete_user(uid, app=self.app)
+        with _translate_admin_errors():
+            auth.delete_user(uid, app=self.app)
 
     def children_of(self, uid: str) -> list[tuple[str, list[str]]]:
         """Return ``(child_id, parent_uids)`` for every child doc that
@@ -119,7 +151,8 @@ class AdminClient:
         handled server-side by the ``onChildDelete`` Cloud Function
         trigger (best-effort).
         """
-        self.db.recursive_delete(self.db.document(f"children/{child_id}"))
+        with _translate_admin_errors():
+            self.db.recursive_delete(self.db.document(f"children/{child_id}"))
 
     def track_doc(self, path: str) -> None:
         """Register a Firestore document path for cleanup."""
