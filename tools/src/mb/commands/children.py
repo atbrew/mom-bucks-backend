@@ -1,4 +1,4 @@
-"""Children commands: create-child, list-children."""
+"""Children commands: create, list, update, delete."""
 
 from __future__ import annotations
 
@@ -103,7 +103,11 @@ def _format_dob(dob_raw: object) -> str:
     return "—"
 
 
-def _child_table(title: str, child_id: str, child: dict) -> Table:
+def _format_euros(cents: int) -> str:
+    return f"\u20ac{cents / 100:.2f}"
+
+
+def _make_child_table(title: str) -> Table:
     table = Table(title=title)
     table.add_column("ID", overflow="fold")
     table.add_column("Name")
@@ -111,18 +115,24 @@ def _child_table(title: str, child_id: str, child: dict) -> Table:
     table.add_column("Photo", overflow="fold")
     table.add_column("Parents", overflow="fold")
     table.add_column("Balance", justify="right")
-    balance_cents = child.get("balance", 0)
-    photo = child.get("photoUrl") or "—"
+    return table
+
+
+def _child_row(child_id: str, child: dict) -> tuple[str, ...]:
     parents = child.get("parentUids") or []
-    parents_display = ", ".join(parents) if parents else "—"
-    table.add_row(
+    return (
         child_id,
         child.get("name", "?"),
         _format_dob(child.get("dateOfBirth")),
-        photo,
-        parents_display,
-        f"\u20ac{balance_cents / 100:.2f}",
+        child.get("photoUrl") or "—",
+        ", ".join(parents) if parents else "—",
+        _format_euros(child.get("balance", 0)),
     )
+
+
+def _child_table(title: str, child_id: str, child: dict) -> Table:
+    table = _make_child_table(title)
+    table.add_row(*_child_row(child_id, child))
     return table
 
 
@@ -197,6 +207,61 @@ def update_child(
     console.print(_child_table("After", child_id, after))
 
 
+@children_group.command("delete")
+@click.option("--child-id", required=True, help="Child document ID.")
+@click.option(
+    "--yes",
+    is_flag=True,
+    default=False,
+    help="Skip the confirmation prompt (for scripted cleanup).",
+)
+@click.pass_context
+def delete_child(ctx: click.Context, child_id: str, yes: bool) -> None:
+    """Permanently delete a child and all of their subcollection data.
+
+    The child doc deletion fires the ``onChildDelete`` Cloud Function,
+    which cascades to:
+      - subcollections (transactions, vaultTransactions, activities)
+      - profile image at ``children/{id}/profile.jpg`` (Storage)
+      - orphaned invites where ``childId == id``
+
+    For co-parented children this deletes the shared record for ALL
+    parents — there's no per-parent "leave" semantics in this CLI.
+    """
+    client = _get_client(ctx)
+    child = client.get_doc(f"children/{child_id}")
+    if not child:
+        console.print(f"[red]Child {child_id} not found.[/red]")
+        raise SystemExit(1)
+
+    parents = child.get("parentUids") or []
+    co_parents = [u for u in parents if u != client.uid]
+
+    console.print("[bold red]About to permanently delete:[/bold red]")
+    console.print(f"  Child ID: {child_id}")
+    console.print(f"  Name:     {child.get('name', '—')}")
+    console.print(f"  DOB:      {_format_dob(child.get('dateOfBirth'))}")
+    console.print(f"  Balance:  {_format_euros(child.get('balance', 0))}")
+    if co_parents:
+        console.print(
+            f"  [yellow]Co-parents (will lose access): "
+            f"{', '.join(co_parents)}[/yellow]"
+        )
+
+    if not yes:
+        click.confirm(
+            "Proceed with deletion?",
+            default=False,
+            abort=True,
+        )
+
+    client.delete_doc(f"children/{child_id}")
+    console.print(
+        f"[green]Deleted[/green] children/{child_id} "
+        "(subcollections + photo + invites cascade via onChildDelete)"
+    )
+
+
 @children_group.command("list")
 @click.pass_context
 def list_children(ctx: click.Context) -> None:
@@ -208,24 +273,7 @@ def list_children(ctx: click.Context) -> None:
     if not children:
         console.print("[dim]No children found.[/dim]")
         return
-    table = Table(title="Children")
-    table.add_column("ID", overflow="fold")
-    table.add_column("Name")
-    table.add_column("DOB")
-    table.add_column("Photo", overflow="fold")
-    table.add_column("Parents", overflow="fold")
-    table.add_column("Balance", justify="right")
+    table = _make_child_table("Children")
     for child in children:
-        balance_cents = child.get("balance", 0)
-        photo = child.get("photoUrl") or "—"
-        parents = child.get("parentUids") or []
-        parents_display = ", ".join(parents) if parents else "—"
-        table.add_row(
-            child.get("_id", "?"),
-            child.get("name", "?"),
-            _format_dob(child.get("dateOfBirth")),
-            photo,
-            parents_display,
-            f"\u20ac{balance_cents / 100:.2f}",
-        )
+        table.add_row(*_child_row(child.get("_id", "?"), child))
     console.print(table)

@@ -21,9 +21,13 @@ from .commands.smoke_test import smoke_test
 
 
 class MbGroup(click.Group):
-    """Click group that converts our domain errors (AuthError,
-    FirestoreError) into ``click.ClickException`` so they render as a
-    single-line error message instead of a Python traceback."""
+    """Click group that converts our domain errors into
+    ``click.ClickException`` so they render as a single-line error
+    message instead of a Python traceback. Admin SDK errors
+    (``ValueError`` from input validation, ``FirebaseError`` from the
+    backend) are translated to ``AuthError`` at the SDK boundary in
+    ``admin.py``, so the catch list here stays narrow — any other
+    ``Exception`` is a real bug and SHOULD surface as a traceback."""
 
     def invoke(self, ctx: click.Context):
         try:
