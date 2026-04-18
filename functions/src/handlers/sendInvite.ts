@@ -62,10 +62,12 @@ export type SendInviteDecision =
 // ─── Pure decision logic ────────────────────────────────────────────
 
 /**
- * Given the caller, child doc, and raw invitedEmail, decide whether
- * the invite should be created. Pure so the parent-membership check
- * and email normalisation can be unit-tested without the Firestore
- * transaction machinery.
+ * Given the caller (uid + email), child doc, and raw invitedEmail,
+ * decide whether the invite should be created. Pure so the
+ * parent-membership check, self-invite guard, and email normalisation
+ * can be unit-tested without the Firestore transaction machinery.
+ * Pass ``callerEmail`` as null for phone/anonymous-auth callers; the
+ * self-invite guard is skipped when no email is present.
  */
 export function decideSendInvite(params: {
   callerUid: string;
