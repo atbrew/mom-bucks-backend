@@ -60,11 +60,12 @@ export type SendInviteDecision =
  */
 export function decideSendInvite(params: {
   callerUid: string;
+  callerEmail: string | null | undefined;
   childId: string;
   invitedEmail: string;
   child: ChildDoc | null;
 }): SendInviteDecision {
-  const { callerUid, childId, invitedEmail, child } = params;
+  const { callerUid, callerEmail, childId, invitedEmail, child } = params;
 
   if (typeof childId !== "string" || childId.length === 0) {
     return {
@@ -103,7 +104,26 @@ export function decideSendInvite(params: {
     };
   }
 
-  return { kind: "send", normalizedEmail: invitedEmail.trim().toLowerCase() };
+  const normalizedEmail = invitedEmail.trim().toLowerCase();
+
+  // Self-invite is never meaningful: the inviter is already a parent
+  // (checked above), so accepting their own invite is a no-op at best
+  // and clutters the inbox at worst. Reject before we mint a doc.
+  // Only enforceable when the auth token carries an email; providers
+  // without email (phone auth, anonymous) can't self-invite by email
+  // anyway.
+  if (
+    callerEmail != null
+    && callerEmail.trim().toLowerCase() === normalizedEmail
+  ) {
+    return {
+      kind: "reject",
+      code: "invalid-argument",
+      message: "cannot invite yourself",
+    };
+  }
+
+  return { kind: "send", normalizedEmail };
 }
 
 // ─── Handler ────────────────────────────────────────────────────────
@@ -119,6 +139,8 @@ export const sendInvite = onCall<
     );
   }
   const callerUid = request.auth.uid;
+  const callerEmail =
+    (request.auth.token?.email as string | undefined) ?? null;
 
   const { childId, invitedEmail } = request.data ?? ({} as SendInviteRequest);
 
@@ -129,6 +151,7 @@ export const sendInvite = onCall<
 
   const decision = decideSendInvite({
     callerUid,
+    callerEmail,
     childId,
     invitedEmail,
     child,
