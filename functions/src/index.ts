@@ -16,6 +16,7 @@
  *   #18 onActivityPush           — Firestore trigger (FCM fan-out on activity)
  *       onProfileImageUpload     — Storage trigger (resize + photoUrl update)
  *       onUserCreated            — Auth trigger (create users/{uid} doc)
+ *       onUserDeleted            — Auth trigger (delete users/{uid}/profile.jpg)
  */
 
 export { helloWorld } from "./helloWorld";
@@ -31,3 +32,4 @@ export { sendHabitNotifications } from "./handlers/sendHabitNotifications";
 export { onTransactionPush, onActivityPush } from "./handlers/sendChildPush";
 export { onProfileImageUpload } from "./handlers/onProfileImageUpload";
 export { onUserCreated } from "./handlers/onUserCreated";
+export { onUserDeleted } from "./handlers/onUserDeleted";
