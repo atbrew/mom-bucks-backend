@@ -119,7 +119,7 @@ A `uv`-managed Python CLI for manual verification and smoke testing.
 cd tools
 uv sync
 uv run mb --help                          # see all commands
-uv run mb auth create-account --email ... --password ... --name ...
+uv run mb auth create --email ... --password ... --name ...
 uv run mb children create --email ... --password ... --name "Sam"
 uv run mb smoke-test                      # full end-to-end cycle
 uv run mb --project prod smoke-test       # against prod

@@ -1,4 +1,12 @@
-"""Auth commands: create-account, login, set-photo."""
+"""Auth commands: create, list, update, delete, login.
+
+Mirrors the children command surface (create / list / update / delete)
+for parity. `update` merges the old `set-photo` behaviour with name
+changes; `--photo` and `--clear-photo` are mutually exclusive.
+
+`login` is unique to auth (no children equivalent) — it's a quick
+credential check that prints the current profile.
+"""
 
 from __future__ import annotations
 
@@ -45,7 +53,7 @@ def auth_group() -> None:
     """Account management."""
 
 
-@auth_group.command("create-account")
+@auth_group.command("create")
 @click.option("--email", required=True, help="User email.")
 @click.option("--password", required=True, help="User password.")
 @click.option("--name", required=True, help="Display name.")
@@ -166,7 +174,70 @@ def _ms_to_date(ms: int | None) -> str:
     )
 
 
-@auth_group.command("delete-account")
+@auth_group.command("update")
+@click.option("--email", required=True, help="User email.")
+@click.option("--password", required=True, help="User password.")
+@click.option("--name", default=None, help="New display name.")
+@click.option(
+    "--photo",
+    "photo_path",
+    default=None,
+    type=click.Path(exists=True),
+    help="Path to new profile photo (uploaded to Storage).",
+)
+@click.option(
+    "--clear-photo",
+    is_flag=True,
+    default=False,
+    help="Remove the profile photo (set photoUrl to null).",
+)
+@click.pass_context
+def update_account(
+    ctx: click.Context,
+    email: str,
+    password: str,
+    name: str | None,
+    photo_path: str | None,
+    clear_photo: bool,
+) -> None:
+    """Update mutable fields on the signed-in account (name, photo)."""
+    if name is None and photo_path is None and not clear_photo:
+        raise click.UsageError(
+            "Pass at least one of --name, --photo, --clear-photo."
+        )
+    if photo_path and clear_photo:
+        raise click.UsageError("Cannot use --photo and --clear-photo together.")
+    config: ProjectConfig = ctx.obj["config"]
+    client = _sign_in_client(config, email, password)
+    before = client.get_doc(f"users/{client.uid}")
+    console.print(_user_table("Before", client.uid, email, before))
+    fields: dict = {}
+    if name is not None:
+        fields["displayName"] = name
+    if clear_photo:
+        fields["photoUrl"] = None
+    if fields:
+        client.update_doc(f"users/{client.uid}", fields)
+    if clear_photo:
+        console.print("[green]Photo cleared.[/green]")
+    if photo_path:
+        storage_path = f"users/{client.uid}/profile.jpg"
+        client.upload_file(storage_path, photo_path)
+        console.print(f"[green]Photo uploaded:[/green] {storage_path}")
+        console.print("[dim]Waiting for photoUrl update...[/dim]")
+        try:
+            after = client.poll_doc_field(
+                f"users/{client.uid}", "photoUrl", storage_path,
+                timeout_s=15, interval_s=3,
+            )
+        except TimeoutError:
+            after = client.get_doc(f"users/{client.uid}") or {}
+    else:
+        after = client.get_doc(f"users/{client.uid}") or {}
+    console.print(_user_table("After", client.uid, email, after))
+
+
+@auth_group.command("delete")
 @click.option("--email", required=True, help="Email of the account to delete.")
 @click.option(
     "--yes",
@@ -195,7 +266,7 @@ def delete_account(ctx: click.Context, email: str, yes: bool) -> None:
     alias = ctx.obj["project_alias"]
     if alias != "dev":
         raise click.UsageError(
-            f"delete-account is only available against --project dev "
+            f"auth delete is only available against --project dev "
             f"(got {alias!r}). Use the Firebase console for prod."
         )
     config: ProjectConfig = ctx.obj["config"]
@@ -287,35 +358,3 @@ def login(ctx: click.Context, email: str, password: str) -> None:
     client = _sign_in_client(config, email, password)
     user_doc = client.get_doc(f"users/{client.uid}")
     console.print(_user_table("Account", client.uid, email, user_doc))
-
-
-@auth_group.command("set-photo")
-@click.option("--email", required=True, help="User email.")
-@click.option("--password", required=True, help="User password.")
-@click.option(
-    "--photo",
-    "photo_path",
-    required=True,
-    type=click.Path(exists=True),
-    help="Path to profile photo.",
-)
-@click.pass_context
-def set_photo(ctx: click.Context, email: str, password: str, photo_path: str) -> None:
-    """Upload a profile photo for the current user."""
-    config: ProjectConfig = ctx.obj["config"]
-    client = _sign_in_client(config, email, password)
-    console.print(_user_table("Before", client.uid, email,
-                              client.get_doc(f"users/{client.uid}")))
-    storage_path = f"users/{client.uid}/profile.jpg"
-    client.upload_file(storage_path, photo_path)
-    console.print(f"[green]Photo uploaded:[/green] {storage_path}")
-    console.print("[dim]Waiting for photoUrl update...[/dim]")
-    try:
-        client.poll_doc_field(
-            f"users/{client.uid}", "photoUrl", storage_path,
-            timeout_s=15, interval_s=3,
-        )
-    except TimeoutError:
-        pass
-    console.print(_user_table("After", client.uid, email,
-                              client.get_doc(f"users/{client.uid}")))
