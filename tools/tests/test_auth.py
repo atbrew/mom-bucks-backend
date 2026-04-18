@@ -335,6 +335,31 @@ def test_delete_account_reports_missing_user():
     mock_admin.delete_user.assert_not_called()
 
 
+def test_create_account_malformed_email_renders_cleanly():
+    """Admin SDK's `validate_email` raises a bare ValueError for
+    garbage input (e.g. `--email …`). The CLI must render this as a
+    one-line Click error, not a 30-line Python traceback — otherwise
+    the operator can't see the actual problem in the noise."""
+    runner = CliRunner()
+    mock_admin = MagicMock()
+    mock_admin.create_user.side_effect = ValueError(
+        'Malformed email address string: "…".'
+    )
+
+    with patch("mb.commands.auth.AdminClient", return_value=mock_admin):
+        result = runner.invoke(main, [
+            "auth", "create",
+            "--email", "…",
+            "--password", "pw",
+            "--name", "Test",
+        ])
+
+    assert result.exit_code != 0
+    assert "Traceback" not in result.output
+    assert "Malformed email" in result.output
+    assert "Error:" in result.output
+
+
 def test_update_account_changes_display_name():
     """`auth update --name` should write displayName to users/{uid}
     and render a Before/After table so the operator can confirm the
