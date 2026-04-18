@@ -17,7 +17,7 @@ import secrets
 import time
 from dataclasses import dataclass
 from datetime import datetime, timezone
-from typing import Any
+from typing import Any, TypedDict
 
 import requests
 
@@ -40,16 +40,55 @@ def _generate_doc_id() -> str:
 
 # ─── Project configuration ─────────────────────────────────────────
 
+# The `emu` alias reuses the dev project id on purpose: any Admin-SDK
+# call that bypasses the emulator lands in dev, never prod. Keeping
+# the id in a single constant means a future rename of the dev project
+# can't leave `emu` pointing at the old value.
+_DEV_PROJECT_ID = "mom-bucks-dev-b3772"
+_PROD_PROJECT_ID = "mom-bucks-prod-81096"
+
+
+class EmulatorHosts(TypedDict):
+    """Emulator host:port map. Keys mirror firebase.json → emulators.
+
+    Typed so mistaking a key (e.g. `hosts['storage']` vs `hosts['stoage']`)
+    is a static error rather than a KeyError at smoke-test time.
+    """
+
+    auth: str
+    firestore: str
+    functions: str
+    storage: str
+
+
 PROJECTS = {
     "dev": {
-        "project_id": "mom-bucks-dev-b3772",
+        "project_id": _DEV_PROJECT_ID,
         "api_key_env": "FIREBASE_WEB_API_KEY_DEV",
         "region": "us-central1",
     },
     "prod": {
-        "project_id": "mom-bucks-prod-81096",
+        "project_id": _PROD_PROJECT_ID,
         "api_key_env": "FIREBASE_WEB_API_KEY_PROD",
         "region": "us-central1",
+    },
+    # `emu` routes every endpoint — Auth, Firestore, callables, Storage
+    # — to the local Firebase emulator suite. Ports must mirror
+    # firebase.json → emulators. No API key or service account is
+    # required: the Auth emulator accepts any key, and the Admin SDK
+    # skips credential validation when FIREBASE_*_EMULATOR_HOST env
+    # vars are set (wired up in cli.py).
+    "emu": {
+        "project_id": _DEV_PROJECT_ID,
+        "api_key_env": None,
+        "region": "us-central1",
+        "emulator": True,
+        "hosts": {
+            "auth": "localhost:9099",
+            "firestore": "localhost:8080",
+            "functions": "localhost:5005",
+            "storage": "localhost:9199",
+        },
     },
 }
 
@@ -58,11 +97,17 @@ PROJECTS = {
 class ProjectConfig:
     project_id: str
     api_key: str
-    api_key_env: str
+    api_key_env: str | None
     region: str
+    emulator: bool = False
+    hosts: EmulatorHosts | None = None
 
     def require_api_key(self) -> str:
         """Return the API key, raising if not set."""
+        if self.emulator:
+            # Auth emulator accepts any non-empty key — only the URL
+            # routing matters, not the value.
+            return "fake-emulator-key"
         if not self.api_key:
             raise RuntimeError(
                 f"Environment variable {self.api_key_env} is not set. "
@@ -71,7 +116,27 @@ class ProjectConfig:
         return self.api_key
 
     @property
+    def auth_url_base(self) -> str:
+        """Base URL for Firebase Auth REST calls (without trailing
+        path). The emulator hosts the real API path under its own
+        origin, so both prod and emulator share the `/v1/accounts:*`
+        suffix used at call sites."""
+        if self.emulator:
+            assert self.hosts is not None
+            return (
+                f"http://{self.hosts['auth']}"
+                "/identitytoolkit.googleapis.com/v1"
+            )
+        return "https://identitytoolkit.googleapis.com/v1"
+
+    @property
     def firestore_url(self) -> str:
+        if self.emulator:
+            assert self.hosts is not None
+            return (
+                f"http://{self.hosts['firestore']}/v1/projects/"
+                f"{self.project_id}/databases/(default)/documents"
+            )
         return (
             f"https://firestore.googleapis.com/v1/projects/"
             f"{self.project_id}/databases/(default)/documents"
@@ -79,19 +144,40 @@ class ProjectConfig:
 
     @property
     def functions_url(self) -> str:
+        if self.emulator:
+            # Emulator callable URL shape differs from prod:
+            # http://host/{project}/{region}/{name} vs
+            # https://{region}-{project}.cloudfunctions.net/{name}
+            assert self.hosts is not None
+            return (
+                f"http://{self.hosts['functions']}"
+                f"/{self.project_id}/{self.region}"
+            )
         return (
             f"https://{self.region}-{self.project_id}.cloudfunctions.net"
         )
 
+    @property
+    def storage_url_base(self) -> str:
+        """Base URL for Firebase Storage object operations
+        (without the `/v0/b/...` suffix)."""
+        if self.emulator:
+            assert self.hosts is not None
+            return f"http://{self.hosts['storage']}"
+        return "https://firebasestorage.googleapis.com"
+
 
 def get_project_config(alias: str) -> ProjectConfig:
     info = PROJECTS[alias]
-    api_key = os.environ.get(info["api_key_env"], "")
+    api_key_env = info.get("api_key_env")
+    api_key = os.environ.get(api_key_env, "") if api_key_env else ""
     return ProjectConfig(
         project_id=info["project_id"],
         api_key=api_key,
-        api_key_env=info["api_key_env"],
+        api_key_env=api_key_env,
         region=info["region"],
+        emulator=info.get("emulator", False),
+        hosts=info.get("hosts"),
     )
 
 
@@ -106,27 +192,54 @@ class FirestoreError(RuntimeError):
     response body attached so rule-denial reasons are visible."""
 
 
+def _extract_error_message(resp: requests.Response) -> str:
+    """Pull a human-friendly message from a Firebase error response.
+
+    Firebase REST errors come back as ``{"error": {"message": "...",
+    "status": "..."}}``. Rules-denial messages are already readable but
+    have leading whitespace and line-number noise — strip that so the
+    CLI shows one clean line. Fall back to the raw body on anything we
+    don't recognise."""
+    try:
+        payload = resp.json()
+    except ValueError:
+        return resp.text.strip()
+    if isinstance(payload, dict):
+        err = payload.get("error")
+        if isinstance(err, dict):
+            msg = err.get("message")
+            if isinstance(msg, str) and msg.strip():
+                return msg.strip()
+        if isinstance(err, str) and err.strip():
+            return err.strip()
+    return resp.text.strip()
+
+
 def _check(resp: requests.Response, operation: str) -> None:
-    """Raise ``FirestoreError`` on any 4xx/5xx response, including the
-    status code and body so the CLI can render a useful one-line error
-    instead of letting ``requests.HTTPError`` propagate as a traceback."""
+    """Raise ``FirestoreError`` on any 4xx/5xx response, unwrapping the
+    Firebase error envelope so the CLI can render a useful one-line
+    error instead of letting ``requests.HTTPError`` propagate."""
     if resp.status_code >= 400:
         raise FirestoreError(
-            f"{operation} failed ({resp.status_code}): {resp.text}"
+            f"{operation} failed ({resp.status_code}): "
+            f"{_extract_error_message(resp)}"
         )
 
 
 def sign_in(api_key: str | ProjectConfig, email: str, password: str) -> dict:
     """Sign in via Firebase Auth REST API, return the full response.
 
-    api_key can be a string or a ProjectConfig (calls require_api_key()).
+    Pass a ``ProjectConfig`` to route correctly for the emulator —
+    the bare-string form hits prod Auth and is kept only for backwards
+    compatibility with pre-emulator call sites.
     """
     if isinstance(api_key, ProjectConfig):
-        api_key = api_key.require_api_key()
-    url = (
-        "https://identitytoolkit.googleapis.com/v1/"
-        f"accounts:signInWithPassword?key={api_key}"
-    )
+        base = api_key.auth_url_base
+        key = api_key.require_api_key()
+    else:
+        base = "https://identitytoolkit.googleapis.com/v1"
+        key = api_key
+    url = f"{base}/accounts:signInWithPassword?key={key}"
     resp = requests.post(url, json={
         "email": email,
         "password": password,
@@ -313,7 +426,7 @@ class FirestoreClient:
         if resp.status_code >= 400:
             raise FirestoreError(
                 f"commit failed ({resp.status_code}) for "
-                f"{full_path}: {resp.text}"
+                f"{full_path}: {_extract_error_message(resp)}"
             )
         return doc_id
 
@@ -384,7 +497,16 @@ class FirestoreClient:
         return results
 
     def call_function(self, name: str, data: dict) -> dict:
-        """Invoke a callable Cloud Function."""
+        """Invoke a callable Cloud Function.
+
+        On error, raises a bare ``FirestoreError`` containing only the
+        ``HttpsError`` message — callable failures are user-facing by
+        design (they carry the action the caller should take), so the
+        operation prefix and HTTP status that ``_check`` adds are noise
+        here. The internal callable name is omitted for the same
+        reason; the CLI subcommand that produced the call is already in
+        the user's shell history.
+        """
         url = f"{self.config.functions_url}/{name}"
         resp = requests.post(
             url,
@@ -394,7 +516,8 @@ class FirestoreClient:
             },
             json={"data": data},
         )
-        _check(resp, f"call_function {name}")
+        if resp.status_code >= 400:
+            raise FirestoreError(_extract_error_message(resp))
         return resp.json().get("result", {})
 
     def call_http_function(self, name: str) -> dict:
@@ -413,7 +536,7 @@ class FirestoreClient:
         # `%`, `?`, etc. would have broken the upload URL.
         import mimetypes
         bucket = f"{self.config.project_id}.firebasestorage.app"
-        url = f"https://firebasestorage.googleapis.com/v0/b/{bucket}/o"
+        url = f"{self.config.storage_url_base}/v0/b/{bucket}/o"
         content_type = mimetypes.guess_type(local_path)[0] or "image/jpeg"
         with open(local_path, "rb") as f:
             data = f.read()
@@ -429,7 +552,7 @@ class FirestoreClient:
         if resp.status_code >= 400:
             raise FirestoreError(
                 f"Upload failed ({resp.status_code}) for "
-                f"{storage_path}: {resp.text}"
+                f"{storage_path}: {_extract_error_message(resp)}"
             )
         return storage_path
 

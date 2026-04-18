@@ -64,7 +64,9 @@ export function decideRevokeInvite(params: {
     return {
       kind: "reject",
       code: "failed-precondition",
-      message: "invite has already been accepted; use removeParentFromChildren instead",
+      message:
+        "invite has already been accepted — the invitee is now a co-parent. "
+        + "Remove their access from the child instead of revoking the invite.",
     };
   }
 

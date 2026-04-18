@@ -19,7 +19,7 @@ def _get_client(ctx: click.Context) -> FirestoreClient:
     password = ctx.obj.get("password")
     if not email or not password:
         raise click.UsageError("Use --email and --password on the parent group.")
-    token_data = sign_in(config.require_api_key(), email, password)
+    token_data = sign_in(config, email, password)
     return FirestoreClient(config, token_data["idToken"], token_data["localId"])
 
 
@@ -58,13 +58,6 @@ def add_transaction(
         raise SystemExit(1)
     balance_before = before.get("balance", 0)
     amount_cents = round(amount * 100)
-    if txn_type == "WITHDRAW" and amount_cents > balance_before:
-        console.print(
-            f"[red]Insufficient balance:[/red] "
-            f"\u20ac{amount:.2f} {txn_type} exceeds "
-            f"balance of \u20ac{balance_before / 100:.2f}"
-        )
-        raise SystemExit(1)
     try:
         txn_id = client.create_doc_with_server_time(
             f"children/{child_id}/transactions",

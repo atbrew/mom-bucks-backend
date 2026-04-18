@@ -13,6 +13,7 @@ if (getApps().length === 0) {
   initializeApp();
 }
 
+export { getAuth } from "firebase-admin/auth";
 export { getFirestore, FieldValue, FieldPath, Timestamp } from "firebase-admin/firestore";
 export { getMessaging } from "firebase-admin/messaging";
 export { getStorage } from "firebase-admin/storage";

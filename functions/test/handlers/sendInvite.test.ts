@@ -126,6 +126,40 @@ describe("decideSendInvite", () => {
     }
   });
 
+  it("rejects when the invitee's existing uid is already a parent", () => {
+    // If Bob already has an account and is already in parentUids,
+    // minting a new invite is a no-op that clutters his inbox.
+    // The handler does the Auth lookup; here we just verify the
+    // decision function trusts the resolved uid.
+    const decision = decideSendInvite({
+      callerUid: "alice",
+      callerEmail: "alice@example.com",
+      childId: "sam",
+      invitedEmail: "bob@example.com",
+      child: { parentUids: ["alice", "bob-uid"], name: "Sam" },
+      inviteeExistingUid: "bob-uid",
+    });
+    expect(decision.kind).toBe("reject");
+    if (decision.kind === "reject") {
+      expect(decision.code).toBe("already-exists");
+      expect(decision.message).toMatch(/already a parent/i);
+    }
+  });
+
+  it("allows the invite when the existing uid is not yet a parent", () => {
+    // Bob has an account but hasn't been added to Sam yet — this is
+    // the normal co-parent flow and must not trip the new guard.
+    const decision = decideSendInvite({
+      callerUid: "alice",
+      callerEmail: "alice@example.com",
+      childId: "sam",
+      invitedEmail: "bob@example.com",
+      child: { parentUids: ["alice"], name: "Sam" },
+      inviteeExistingUid: "bob-uid",
+    });
+    expect(decision).toEqual({ kind: "send", normalizedEmail: "bob@example.com" });
+  });
+
   it("allows the invite when callerEmail is missing (no enforcement possible)", () => {
     // Phone-auth and anonymous-auth callers have no email in the
     // token. We'd rather send the invite than block legitimate co-

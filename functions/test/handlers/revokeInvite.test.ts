@@ -29,10 +29,10 @@ describe("decideRevokeInvite", () => {
     }
   });
 
-  it("rejects when invite has already been accepted (use removeParentFromChildren)", () => {
+  it("rejects when invite has already been accepted", () => {
     // Revoking an accepted invite wouldn't reverse the access grant;
-    // it would just erase the audit trail. Force the caller to use
-    // removeParentFromChildren for that case.
+    // it would just erase the audit trail. Force the caller to take
+    // the remove-access path on the child instead.
     const decision = decideRevokeInvite({
       callerUid: "alice",
       invite: { invitedByUid: "alice", acceptedByUid: "bob" },
@@ -40,6 +40,9 @@ describe("decideRevokeInvite", () => {
     expect(decision.kind).toBe("reject");
     if (decision.kind === "reject") {
       expect(decision.code).toBe("failed-precondition");
+      // Message must be actionable — no internal callable names.
+      expect(decision.message.toLowerCase()).toContain("already been accepted");
+      expect(decision.message).not.toContain("removeParentFromChildren");
     }
   });
 });

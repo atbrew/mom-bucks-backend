@@ -15,16 +15,35 @@ exercise the real auth + rules path.
 
 from __future__ import annotations
 
+import os
 from contextlib import contextmanager
 
 import firebase_admin
 import firebase_admin.exceptions
+import google.auth.credentials
 from firebase_admin import auth, credentials, firestore
 from rich.console import Console
 
 from .client import AuthError
 
 console = Console()
+
+
+class _EmulatorCredential(credentials.Base):
+    """No-op credential for emulator use.
+
+    ``ApplicationDefault()`` would need real gcloud ADC or a service
+    account file — neither is necessary when every Google API call is
+    going to the local emulator (which skips token validation). Using
+    an anonymous credential here lets ``firebase_admin.initialize_app``
+    succeed without any auth setup. Prod/dev paths are unaffected:
+    this class is only picked when ``FIREBASE_AUTH_EMULATOR_HOST`` is
+    set, and any accidental call to a real Google endpoint would fail
+    loudly with a 401, not silently hit prod with valid creds.
+    """
+
+    def get_credential(self) -> google.auth.credentials.Credentials:
+        return google.auth.credentials.AnonymousCredentials()
 
 
 @contextmanager
@@ -69,11 +88,17 @@ class AdminClient:
 
     def __init__(self, project_id: str, credentials_path: str | None = None):
         self.project_id = project_id
-        cred = (
-            credentials.Certificate(credentials_path)
-            if credentials_path
-            else credentials.ApplicationDefault()
-        )
+        cred: credentials.Base
+        if os.environ.get("FIREBASE_AUTH_EMULATOR_HOST"):
+            # Emulator mode — skip ADC entirely. See _EmulatorCredential.
+            # Checked first so `mb --project emu` keeps its "no credentials
+            # needed" promise even when GOOGLE_APPLICATION_CREDENTIALS is
+            # set globally in the shell for other commands.
+            cred = _EmulatorCredential()
+        elif credentials_path:
+            cred = credentials.Certificate(credentials_path)
+        else:
+            cred = credentials.ApplicationDefault()
         self.app = firebase_admin.initialize_app(
             cred,
             {"projectId": project_id},
@@ -127,6 +152,52 @@ class AdminClient:
         """Delete a Firebase Auth user. Raises on Admin SDK errors."""
         with _translate_admin_errors():
             auth.delete_user(uid, app=self.app)
+
+    def get_emails_by_uid(self, uids: list[str]) -> dict[str, str]:
+        """Resolve a batch of UIDs to emails via the Admin SDK.
+
+        Returns `{uid: email}` for every uid that resolves and skips
+        the rest — missing records and users without an email address
+        both drop silently, because this is a display-layer helper
+        (``children list`` / co-parent warnings) not an identity
+        operation. Anything that matters for correctness should NOT
+        key off this.
+
+        Uses ``auth.get_users`` (single batch request per 100 uids)
+        rather than per-uid ``auth.get_user`` calls, so a user with
+        several co-parents doesn't get N round-trips charged to what
+        is just a table-formatting step.
+        """
+        if not uids:
+            return {}
+        # Deduplicate while preserving order (stable output for the
+        # table rendering layer).
+        seen: set[str] = set()
+        ordered: list[str] = []
+        for u in uids:
+            if u not in seen:
+                seen.add(u)
+                ordered.append(u)
+        # Admin SDK caps get_users at 100 identifiers per request.
+        out: dict[str, str] = {}
+        for i in range(0, len(ordered), 100):
+            chunk = ordered[i:i + 100]
+            try:
+                result = auth.get_users(
+                    [auth.UidIdentifier(u) for u in chunk],
+                    app=self.app,
+                )
+            except (ValueError, firebase_admin.exceptions.FirebaseError):
+                # Batch-level failure (e.g. transient Admin SDK error)
+                # drops the whole chunk silently — this is a display
+                # helper, not an identity operation. Callers already
+                # handle missing entries via a UID fallback.
+                continue
+            found = {u.uid: u.email for u in result.users if u.email}
+            for uid in chunk:
+                if uid in found:
+                    out[uid] = found[uid]
+        return out
 
     def children_of(self, uid: str) -> list[tuple[str, list[str]]]:
         """Return ``(child_id, parent_uids)`` for every child doc that

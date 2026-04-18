@@ -51,8 +51,13 @@ The emulator UI will be available at <http://localhost:4000>.
 | Firestore | 8080 |
 | Functions | 5005 |
 | Storage   | 9199 |
-| Hosting   | 5000 |
+| Hosting   | 5050 |
 | UI        | 4000 |
+
+Hosting runs on **5050** rather than the Firebase default 5000 because
+macOS Sonoma+ binds port 5000 to AirPlay Receiver by default — booting
+the suite with hosting on 5000 fails with "port taken" on any
+out-of-the-box Mac.
 
 State is persisted between runs in `.emulator-data/` (gitignored), via
 `--import` / `--export-on-exit`.
