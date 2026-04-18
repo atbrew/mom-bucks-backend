@@ -37,7 +37,7 @@
 
 import { onCall, HttpsError } from "firebase-functions/v2/https";
 import { logger } from "firebase-functions";
-import { getFirestore, FieldValue, Timestamp } from "../admin";
+import { getAuth, getFirestore, FieldValue, Timestamp } from "../admin";
 
 const INVITE_TTL_MS = 7 * 24 * 60 * 60 * 1000;
 
@@ -71,6 +71,10 @@ export type SendInviteDecision =
  * for phone-auth or anonymous callers). When present it is compared to
  * the normalised `invitedEmail` to prevent a parent from inviting
  * themselves; callers without an email always pass this check.
+ *
+ * `inviteeExistingUid` — the Auth uid that owns `invitedEmail`, or
+ * null if no account exists yet. Used to short-circuit invites to a
+ * user who is already a parent of this child.
  */
 export function decideSendInvite(params: {
   callerUid: string;
@@ -78,8 +82,16 @@ export function decideSendInvite(params: {
   childId: string;
   invitedEmail: string;
   child: ChildDoc | null;
+  inviteeExistingUid?: string | null;
 }): SendInviteDecision {
-  const { callerUid, callerEmail, childId, invitedEmail, child } = params;
+  const {
+    callerUid,
+    callerEmail,
+    childId,
+    invitedEmail,
+    child,
+    inviteeExistingUid,
+  } = params;
 
   if (typeof childId !== "string" || childId.length === 0) {
     return {
@@ -137,6 +149,22 @@ export function decideSendInvite(params: {
     };
   }
 
+  // If the invitee already has an account and is already a parent of
+  // this child, minting another invite is a no-op — accepting it just
+  // re-adds the uid that's already there and leaves a stale doc in
+  // the invitee's inbox. Reject up front with a message the UI can
+  // surface directly.
+  if (
+    inviteeExistingUid != null
+    && child.parentUids.includes(inviteeExistingUid)
+  ) {
+    return {
+      kind: "reject",
+      code: "already-exists",
+      message: "invitee is already a parent of this child",
+    };
+  }
+
   return { kind: "send", normalizedEmail };
 }
 
@@ -158,6 +186,26 @@ export const sendInvite = onCall<
 
   const { childId, invitedEmail } = request.data ?? ({} as SendInviteRequest);
 
+  // Look up whether the invitee already has a Firebase Auth account.
+  // Done outside the transaction — Auth isn't part of Firestore's
+  // transactional view, and the worst case (account created in the
+  // racing window) is handled by acceptInvite's own parent-add check.
+  // Skip the lookup on malformed input; the pure decision function
+  // will reject those cases before we'd use the result anyway.
+  let inviteeExistingUid: string | null = null;
+  if (typeof invitedEmail === "string" && invitedEmail.includes("@")) {
+    try {
+      const rec = await getAuth().getUserByEmail(
+        invitedEmail.trim().toLowerCase(),
+      );
+      inviteeExistingUid = rec.uid;
+    } catch (err) {
+      if ((err as { code?: string })?.code !== "auth/user-not-found") {
+        throw err;
+      }
+    }
+  }
+
   const db = getFirestore();
   const childRef = db.doc(`children/${childId}`);
   const userRef = db.doc(`users/${callerUid}`);
@@ -172,6 +220,7 @@ export const sendInvite = onCall<
       childId,
       invitedEmail,
       child,
+      inviteeExistingUid,
     });
     if (decision.kind === "reject") {
       throw new HttpsError(decision.code, decision.message);
