@@ -654,8 +654,10 @@ and 7 can land once 4 and 5 are green.
 All resolved (was §10 open questions):
 
 - **Timezone: on `users/{uid}`**; assume co-parents share tz for now.
-- **Interest clock: advance only on non-zero payouts.** Vault at cap
-  stockpiles accrual until money moves.
+- **Interest clock: advance on any non-zero vault write** (interest
+  payout, deposit, match). Vault-at-cap accrual is therefore
+  accounted for on the next non-zero vault write, not only on
+  interest payouts. See §4.5.
 - **Retire `onActivityPush` in this PR**; replace with
   `onActivityCreate`. Full push redesign (claimable-now pings) still
   a follow-up.
