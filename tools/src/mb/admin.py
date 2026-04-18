@@ -15,16 +15,35 @@ exercise the real auth + rules path.
 
 from __future__ import annotations
 
+import os
 from contextlib import contextmanager
 
 import firebase_admin
 import firebase_admin.exceptions
+import google.auth.credentials
 from firebase_admin import auth, credentials, firestore
 from rich.console import Console
 
 from .client import AuthError
 
 console = Console()
+
+
+class _EmulatorCredential(credentials.Base):
+    """No-op credential for emulator use.
+
+    ``ApplicationDefault()`` would need real gcloud ADC or a service
+    account file — neither is necessary when every Google API call is
+    going to the local emulator (which skips token validation). Using
+    an anonymous credential here lets ``firebase_admin.initialize_app``
+    succeed without any auth setup. Prod/dev paths are unaffected:
+    this class is only picked when ``FIREBASE_AUTH_EMULATOR_HOST`` is
+    set, and any accidental call to a real Google endpoint would fail
+    loudly with a 401, not silently hit prod with valid creds.
+    """
+
+    def get_credential(self) -> google.auth.credentials.Credentials:
+        return google.auth.credentials.AnonymousCredentials()
 
 
 @contextmanager
@@ -69,11 +88,13 @@ class AdminClient:
 
     def __init__(self, project_id: str, credentials_path: str | None = None):
         self.project_id = project_id
-        cred = (
-            credentials.Certificate(credentials_path)
-            if credentials_path
-            else credentials.ApplicationDefault()
-        )
+        if credentials_path:
+            cred: credentials.Base = credentials.Certificate(credentials_path)
+        elif os.environ.get("FIREBASE_AUTH_EMULATOR_HOST"):
+            # Emulator mode — skip ADC entirely. See _EmulatorCredential.
+            cred = _EmulatorCredential()
+        else:
+            cred = credentials.ApplicationDefault()
         self.app = firebase_admin.initialize_app(
             cred,
             {"projectId": project_id},

@@ -24,7 +24,7 @@ def _get_client(ctx: click.Context) -> FirestoreClient:
     password = ctx.obj.get("password")
     if not email or not password:
         raise click.UsageError("Use --email and --password on the parent group.")
-    token_data = sign_in(config.require_api_key(), email, password)
+    token_data = sign_in(config, email, password)
     return FirestoreClient(config, token_data["idToken"], token_data["localId"])
 
 

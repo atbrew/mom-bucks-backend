@@ -123,10 +123,12 @@ uv run mb auth create --email ... --password ... --name ...
 uv run mb children create --email ... --password ... --name "Sam"
 uv run mb smoke-test                      # full end-to-end cycle
 uv run mb --project prod smoke-test       # against prod
+uv run mb --project emu smoke-test        # against local emulator suite
 ```
 
 Requires `FIREBASE_WEB_API_KEY_DEV` (or `_PROD`) and
-`GOOGLE_APPLICATION_CREDENTIALS` env vars set.
+`GOOGLE_APPLICATION_CREDENTIALS` env vars set. The `emu` alias needs
+neither — boot the emulators first with `./scripts/start-emulators.sh`.
 
 ## What lives where
 

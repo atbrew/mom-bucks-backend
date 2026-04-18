@@ -44,7 +44,7 @@ def _sign_in_client(config: ProjectConfig, email: str, password: str) -> Firesto
     would create two divergent error paths (sys.exit vs ClickException)
     and lose that uniformity.
     """
-    token_data = sign_in(config.require_api_key(), email, password)
+    token_data = sign_in(config, email, password)
     return FirestoreClient(config, token_data["idToken"], token_data["localId"])
 
 

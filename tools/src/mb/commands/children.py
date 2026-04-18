@@ -22,7 +22,7 @@ def _get_client(ctx: click.Context) -> FirestoreClient:
             "Use --email and --password on the parent group, or set "
             "MB_EMAIL and MB_PASSWORD environment variables."
         )
-    token_data = sign_in(config.require_api_key(), email, password)
+    token_data = sign_in(config, email, password)
     return FirestoreClient(config, token_data["idToken"], token_data["localId"])
 
 

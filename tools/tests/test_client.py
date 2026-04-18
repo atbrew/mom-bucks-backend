@@ -7,7 +7,7 @@ from __future__ import annotations
 
 from unittest.mock import MagicMock, patch
 
-from mb.client import FirestoreClient, ProjectConfig
+from mb.client import FirestoreClient, ProjectConfig, get_project_config
 
 
 def _client() -> FirestoreClient:
@@ -49,3 +49,50 @@ def test_upload_file_passes_object_name_through_params(tmp_path):
     called_url = post.call_args.args[0]
     assert "my photo" not in called_url
     assert "#1" not in called_url
+
+
+def test_emu_project_alias_routes_every_endpoint_to_localhost():
+    """The `emu` alias is load-bearing: it must point every one of the
+    four REST endpoints (Auth, Firestore, callables, Storage) at the
+    local emulator suite. If any one of them leaks to a `*.googleapis.com`
+    host, a developer thinking they're exercising the emulator would
+    silently hit the live dev project — wasting quota and, worse,
+    producing misleading test results.
+    """
+    config = get_project_config("emu")
+    assert config.emulator is True
+    assert config.project_id == "mom-bucks-dev-b3772"
+    # Auth emulator wraps the real API path under its own origin.
+    assert config.auth_url_base.startswith("http://localhost:9099/")
+    assert "identitytoolkit.googleapis.com" in config.auth_url_base
+    # Firestore emulator prefixes `/v1/projects/...` under its own host.
+    assert config.firestore_url.startswith(
+        "http://localhost:8080/v1/projects/mom-bucks-dev-b3772"
+    )
+    # Callables: emulator URL shape is `host/project/region`, not
+    # `region-project.cloudfunctions.net` — regression guard for that
+    # divergence.
+    assert (
+        config.functions_url
+        == "http://localhost:5005/mom-bucks-dev-b3772/us-central1"
+    )
+    # Storage: plain host swap is enough, no path prefix.
+    assert config.storage_url_base == "http://localhost:9199"
+    # API key is not required in emulator mode — `require_api_key`
+    # returns a sentinel string so the Auth REST call still has a
+    # non-empty query param.
+    assert config.require_api_key() == "fake-emulator-key"
+
+
+def test_prod_and_dev_aliases_still_point_at_google_hosts():
+    """Complement to the emu test — prove the two live aliases are
+    untouched by the emulator branches (no accidental localhost leak)."""
+    for alias in ("dev", "prod"):
+        config = get_project_config(alias)
+        assert config.emulator is False
+        assert config.auth_url_base == "https://identitytoolkit.googleapis.com/v1"
+        assert config.firestore_url.startswith(
+            "https://firestore.googleapis.com/v1/projects/"
+        )
+        assert config.functions_url.endswith(".cloudfunctions.net")
+        assert config.storage_url_base == "https://firebasestorage.googleapis.com"
