@@ -17,7 +17,7 @@ import secrets
 import time
 from dataclasses import dataclass
 from datetime import datetime, timezone
-from typing import Any
+from typing import Any, TypedDict
 
 import requests
 
@@ -40,14 +40,35 @@ def _generate_doc_id() -> str:
 
 # ─── Project configuration ─────────────────────────────────────────
 
+# The `emu` alias reuses the dev project id on purpose: any Admin-SDK
+# call that bypasses the emulator lands in dev, never prod. Keeping
+# the id in a single constant means a future rename of the dev project
+# can't leave `emu` pointing at the old value.
+_DEV_PROJECT_ID = "mom-bucks-dev-b3772"
+_PROD_PROJECT_ID = "mom-bucks-prod-81096"
+
+
+class EmulatorHosts(TypedDict):
+    """Emulator host:port map. Keys mirror firebase.json → emulators.
+
+    Typed so mistaking a key (e.g. `hosts['storage']` vs `hosts['stoage']`)
+    is a static error rather than a KeyError at smoke-test time.
+    """
+
+    auth: str
+    firestore: str
+    functions: str
+    storage: str
+
+
 PROJECTS = {
     "dev": {
-        "project_id": "mom-bucks-dev-b3772",
+        "project_id": _DEV_PROJECT_ID,
         "api_key_env": "FIREBASE_WEB_API_KEY_DEV",
         "region": "us-central1",
     },
     "prod": {
-        "project_id": "mom-bucks-prod-81096",
+        "project_id": _PROD_PROJECT_ID,
         "api_key_env": "FIREBASE_WEB_API_KEY_PROD",
         "region": "us-central1",
     },
@@ -56,11 +77,9 @@ PROJECTS = {
     # firebase.json → emulators. No API key or service account is
     # required: the Auth emulator accepts any key, and the Admin SDK
     # skips credential validation when FIREBASE_*_EMULATOR_HOST env
-    # vars are set (wired up in cli.py). Uses the dev project id so
-    # any accidental Admin-SDK call that bypasses the emulator lands
-    # in dev, never prod.
+    # vars are set (wired up in cli.py).
     "emu": {
-        "project_id": "mom-bucks-dev-b3772",
+        "project_id": _DEV_PROJECT_ID,
         "api_key_env": None,
         "region": "us-central1",
         "emulator": True,
@@ -81,7 +100,7 @@ class ProjectConfig:
     api_key_env: str | None
     region: str
     emulator: bool = False
-    hosts: dict | None = None
+    hosts: EmulatorHosts | None = None
 
     def require_api_key(self) -> str:
         """Return the API key, raising if not set."""
@@ -216,10 +235,11 @@ def sign_in(api_key: str | ProjectConfig, email: str, password: str) -> dict:
     """
     if isinstance(api_key, ProjectConfig):
         base = api_key.auth_url_base
-        api_key = api_key.require_api_key()
+        key = api_key.require_api_key()
     else:
         base = "https://identitytoolkit.googleapis.com/v1"
-    url = f"{base}/accounts:signInWithPassword?key={api_key}"
+        key = api_key
+    url = f"{base}/accounts:signInWithPassword?key={key}"
     resp = requests.post(url, json={
         "email": email,
         "password": password,
