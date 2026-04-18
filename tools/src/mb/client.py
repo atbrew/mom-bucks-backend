@@ -477,7 +477,16 @@ class FirestoreClient:
         return results
 
     def call_function(self, name: str, data: dict) -> dict:
-        """Invoke a callable Cloud Function."""
+        """Invoke a callable Cloud Function.
+
+        On error, raises a bare ``FirestoreError`` containing only the
+        ``HttpsError`` message — callable failures are user-facing by
+        design (they carry the action the caller should take), so the
+        operation prefix and HTTP status that ``_check`` adds are noise
+        here. The internal callable name is omitted for the same
+        reason; the CLI subcommand that produced the call is already in
+        the user's shell history.
+        """
         url = f"{self.config.functions_url}/{name}"
         resp = requests.post(
             url,
@@ -487,7 +496,8 @@ class FirestoreClient:
             },
             json={"data": data},
         )
-        _check(resp, f"call_function {name}")
+        if resp.status_code >= 400:
+            raise FirestoreError(_extract_error_message(resp))
         return resp.json().get("result", {})
 
     def call_http_function(self, name: str) -> dict:
