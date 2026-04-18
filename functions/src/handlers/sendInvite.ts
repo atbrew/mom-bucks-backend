@@ -200,7 +200,13 @@ export const sendInvite = onCall<
       );
       inviteeExistingUid = rec.uid;
     } catch (err) {
-      if ((err as { code?: string })?.code !== "auth/user-not-found") {
+      // Swallow "not found" (normal path) and "invalid email" (a
+      // malformed address like "user@" passes our includes("@") guard
+      // but Auth rejects it). Let decideSendInvite turn malformed
+      // input into a 400 invalid-argument instead of bubbling up a
+      // 500 here.
+      const code = (err as { code?: string })?.code;
+      if (code !== "auth/user-not-found" && code !== "auth/invalid-email") {
         throw err;
       }
     }
