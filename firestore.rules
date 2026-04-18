@@ -119,6 +119,36 @@ service cloud.firestore {
           && request.resource.data.createdAt == request.time;
     }
 
+    // True iff an update leaves `allowanceId` exactly as it was.
+    // `allowanceId` is the "at most one ALLOWANCE activity per
+    // child" pointer — it only ever moves via the `createActivity`
+    // / `deleteActivity` callables (Admin SDK, bypasses rules).
+    // Direct client writes must not touch it, otherwise a client
+    // could forge a stale activityId and break the uniqueness
+    // invariant downstream.
+    function allowanceIdUnchanged() {
+      return request.resource.data.allowanceId == resource.data.allowanceId;
+    }
+
+    // True iff an update leaves the `vault` map exactly as it was.
+    // The whole nested map — balance, target, interest/matching
+    // sub-objects, unlockedAt — is Admin-SDK-managed via the vault
+    // callables (`depositToVault`, `claimInterest`, `unlockVault`)
+    // and `mb vault configure`. A direct client write could silently
+    // desync vault.balance from the vaultTransactions ledger, or
+    // flip unlockedAt/weeklyRate to forge interest payouts.
+    //
+    // Deep equality — not `affectedKeys().hasAny(['vault'])` —
+    // because a client could issue a nested field-path update
+    // (`updateDoc(ref, 'vault.balance', 999)`) whose affectedKeys
+    // would read `vault.balance`, not `vault`, and slip past a
+    // top-level key check. Comparing the pre- and post-write map
+    // values catches both whole-map replacement and nested-path
+    // mutation.
+    function vaultUnchanged() {
+      return request.resource.data.vault == resource.data.vault;
+    }
+
     // ─────────────────────────────────────────────────────────────────
     // users/{uid}
     // ─────────────────────────────────────────────────────────────────
@@ -177,12 +207,29 @@ service cloud.firestore {
       // `createdByUidUnchanged()` (below) pins it so the original
       // creator identity can never be overwritten after the fact.
       // PR #32 review feedback.
+      //
+      // `allowanceId` must be `null` on create. The pointer is
+      // managed by `createActivity` / `deleteActivity` callables
+      // (Admin SDK) — letting a client seed a non-null activityId
+      // at child-create time would break the "at most one
+      // ALLOWANCE per child" uniqueness invariant before any
+      // activity even exists.
+      //
+      // `vault` must be `null` on create. Vault config is
+      // written atomically by `mb vault configure` (Admin SDK)
+      // or the forthcoming `configureVault` callable — clients
+      // cannot seed a vault map at child-create time, because
+      // any non-null shape they write would immediately diverge
+      // from the vaultTransactions ledger (balance, interest
+      // clock, etc. all have invariants the callables own).
       allow create: if isSignedIn()
                     && request.resource.data.parentUids is list
                     && request.resource.data.parentUids.size() == 1
                     && request.resource.data.parentUids[0] == request.auth.uid
                     && request.resource.data.createdByUid == request.auth.uid
                     && request.resource.data.dateOfBirth is timestamp
+                    && request.resource.data.allowanceId == null
+                    && request.resource.data.vault == null
                     && createdAtValidOnCreate();
 
       // UPDATE — any current parent can update the child, BUT cannot
@@ -196,12 +243,22 @@ service cloud.firestore {
       // `createdByUidUnchanged()` above for the immutable-field
       // rationale. Membership changes go through the acceptInvite
       // (#13) / removeParentFromChildren (#14) callables.
+      //
+      // `allowanceId` and the whole `vault` map are also pinned on
+      // update (`allowanceIdUnchanged()`, `vaultUnchanged()`).
+      // Movement for those fields is owned by the activity / vault
+      // callables (Admin SDK, bypasses rules); a client-direct
+      // change would either desync `children.allowanceId` from the
+      // activities collection or desync `vault.balance` from the
+      // vaultTransactions ledger.
       allow update: if isSignedIn()
                     && request.auth.uid in resource.data.parentUids
                     && parentUidsUnchanged()
                     && request.resource.data.dateOfBirth is timestamp
                     && createdAtUnchanged()
-                    && createdByUidUnchanged();
+                    && createdByUidUnchanged()
+                    && allowanceIdUnchanged()
+                    && vaultUnchanged();
 
       // DELETE — any current parent can delete the child.
       //
@@ -284,7 +341,7 @@ service cloud.firestore {
       // ───────────────────────────────────────────────────────────
       //
       // Same story as the main transactions collection: the vault
-      // ledger drives `vaultBalance`, interest, and unlocks, so a
+      // ledger drives `vault.balance`, interest, and unlocks, so a
       // forged or backdated `createdAt` — or a post-create
       // mutation of `amount` or `type` — would corrupt the audit
       // trail and any time-based queries. Split the old `read,
@@ -317,8 +374,35 @@ service cloud.firestore {
       // ───────────────────────────────────────────────────────────
       // children/{childId}/activities/{activityId}
       // ───────────────────────────────────────────────────────────
+      //
+      // Reads are any-parent (same as everywhere else under
+      // children). All writes are denied for direct clients —
+      // activities mutate via four callables:
+      //
+      //   create → createActivity  (stamps nextClaimAt = now; for
+      //                             type: 'ALLOWANCE', transactionally
+      //                             sets `children.allowanceId` and
+      //                             rejects if already set)
+      //   update → updateActivity  (title / reward / schedule only;
+      //                             schedule edits recompute
+      //                             nextClaimAt atomically)
+      //   claim  → claimActivity   (writes a main-ledger `EARN` row,
+      //                             bumps `child.balance`, and
+      //                             advances `nextClaimAt` — all in
+      //                             one transaction)
+      //   delete → deleteActivity  (clears `children.allowanceId`
+      //                             when deleting an allowance)
+      //
+      // The deny-direct-writes posture is load-bearing: every
+      // activity mutation has to pair the activity-doc write with
+      // a sibling write (`allowanceId` pointer, main ledger row,
+      // `nextClaimAt` recompute). Rules can't compose those
+      // multi-doc writes atomically; a transactional callable can.
+      // Denying client writes forces all paths through the
+      // callable-owned atomicity guarantees.
       match /activities/{activityId} {
-        allow read, write: if isChildParent(childId);
+        allow read: if isChildParent(childId);
+        allow create, update, delete: if false;
       }
     }
 
