@@ -148,6 +148,22 @@ neither — boot the emulators first with `./scripts/start-emulators.sh`.
 - `docs/firebase-migration-plan.md` — phased migration plan.
 - `docs/schema.md` — collection layout source of truth.
 
+## Always use absolute file paths in chat
+
+When you mention a file in chat (as a reference, a location, a link),
+use the **full absolute path** (e.g.
+`/Users/atbrew/Development/mom-bucks-backend/docs/schema.md`), not a
+repo-relative path (`docs/schema.md`). The user's terminal (Ghostty)
+turns absolute paths into clickable links; relative paths do not
+resolve. This applies to prose, bullet lists, and summary sections —
+anywhere a path appears in user-visible output.
+
+**Never follow a path with a full stop, comma, or other punctuation
+without a space.** Ghostty's link detection includes trailing
+punctuation in the href, so `/path/to/file.md.` opens a path that
+doesn't exist. End the sentence a different way — reword, use a
+colon, or put the path at the start of the sentence.
+
 ## No Compound Commands
 
 **Never chain commands with `&&`, `;`, or `|` in a single Bash tool
