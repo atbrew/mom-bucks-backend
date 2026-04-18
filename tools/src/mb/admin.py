@@ -115,9 +115,9 @@ class AdminClient:
         """Recursively delete ``children/{child_id}`` and every
         subcollection beneath it (transactions, activities, …).
 
-        Storage objects at ``children/{child_id}/…`` are NOT cleaned
-        up — they'll orphan in the bucket. Good enough for dev
-        cleanup; not for prod.
+        Storage cleanup (``children/{child_id}/profile.jpg``) is
+        handled server-side by the ``onChildDelete`` Cloud Function
+        trigger (best-effort).
         """
         self.db.recursive_delete(self.db.document(f"children/{child_id}"))
 
