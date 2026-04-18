@@ -5,11 +5,19 @@
  * method: Admin SDK, Firebase console, or Auth REST API). Cleans up:
  *
  *   1. Profile image at `users/{uid}/profile.jpg` (Storage).
- *   2. Invites sent by this user (`invites` where `invitedByUid == uid`).
+ *   2. User doc at `users/{uid}` (Firestore).
+ *   3. Children where this user is in `parentUids`:
+ *        - Sole parent  → child doc deleted (triggers `onChildDelete`,
+ *          which cascades subcollections, Storage profile image, and
+ *          invites referencing that child).
+ *        - Co-parented  → `uid` removed from `parentUids` via
+ *          `arrayRemove` so remaining parents still have access.
+ *   4. Invites sent by this user (`invites` where `invitedByUid == uid`).
  *
- * Without this trigger, deleting a user account leaves orphaned
- * Storage objects and dangling invite docs that accumulate
- * indefinitely.
+ * Without this trigger, deleting a user account from the Firebase
+ * console (or via the Admin SDK outside the CLI) leaves orphaned
+ * Storage objects, a stale users doc, inaccessible or dangling children,
+ * and lingering invite docs that accumulate indefinitely.
  *
  * Uses the v1 `auth.user().onDelete()` API because firebase-functions
  * v2 only offers blocking identity triggers (beforeUserCreated,
@@ -23,7 +31,7 @@
 
 import * as functions from "firebase-functions/v1";
 import { logger } from "firebase-functions";
-import { getFirestore, getStorage } from "../admin";
+import { getFirestore, getStorage, FieldValue } from "../admin";
 
 // ─── Pure logic ──────────────────────────────────────────────────────
 
@@ -75,11 +83,83 @@ export const onUserDeleted = functions
       });
     }
 
-    // 2. Orphaned invites cleanup (Firestore, best-effort).
-    //    Delete all invites where invitedByUid == uid — these are
-    //    dangling now that the sender no longer exists.
+    const db = getFirestore();
+
+    // 2. User Firestore doc cleanup (best-effort).
+    //    The CLI deletes this before triggering auth deletion, but if
+    //    a user is deleted via the Firebase console or Admin SDK the
+    //    users/{uid} doc would otherwise be orphaned indefinitely.
     try {
-      const db = getFirestore();
+      await db.doc(`users/${user.uid}`).delete();
+      logger.info("[onUserDeleted] user doc deleted", { uid: user.uid });
+    } catch (err) {
+      logger.warn("[onUserDeleted] user doc cleanup failed", {
+        uid: user.uid,
+        ...(err instanceof Error
+          ? { errorMessage: err.message, errorStack: err.stack }
+          : { error: String(err) }),
+      });
+    }
+
+    // 3. Children cascade (best-effort).
+    //    Find all children that list this uid in parentUids and either:
+    //      - Delete the child doc (sole parent) — triggers onChildDelete,
+    //        which cascades subcollections, Storage profile image, and
+    //        child-scoped invites.
+    //      - Remove uid from parentUids (co-parented) — the remaining
+    //        parents keep uninterrupted access.
+    try {
+      const childrenSnap = await db
+        .collection("children")
+        .where("parentUids", "array-contains", user.uid)
+        .get();
+
+      let soleParentDeleted = 0;
+      let coParentDelinked = 0;
+
+      for (const childDoc of childrenSnap.docs) {
+        const parentUids: string[] =
+          (childDoc.data().parentUids as string[]) ?? [];
+
+        if (parentUids.length === 1) {
+          // Sole parent — delete the child doc.  onChildDelete fires
+          // automatically and handles subcollections, Storage, and
+          // child-scoped invites.
+          await childDoc.ref.delete();
+          soleParentDeleted += 1;
+        } else {
+          // Co-parented — remove this uid so remaining parents keep
+          // access and the child doc stays valid.
+          await childDoc.ref.update({
+            parentUids: FieldValue.arrayRemove(user.uid),
+          });
+          coParentDelinked += 1;
+        }
+      }
+
+      if (soleParentDeleted + coParentDelinked > 0) {
+        logger.info("[onUserDeleted] children cascade complete", {
+          uid: user.uid,
+          soleParentDeleted,
+          coParentDelinked,
+        });
+      }
+    } catch (err) {
+      logger.warn("[onUserDeleted] children cascade failed", {
+        uid: user.uid,
+        ...(err instanceof Error
+          ? { errorMessage: err.message, errorStack: err.stack }
+          : { error: String(err) }),
+      });
+    }
+
+    // 4. Orphaned invites cleanup (Firestore, best-effort).
+    //    Delete all invites where invitedByUid == uid — these are
+    //    dangling now that the sender no longer exists.  (Child-scoped
+    //    invites for deleted sole-parent children are already cleaned
+    //    up by onChildDelete in step 3, but this catches any invites
+    //    the user sent for co-parented children.)
+    try {
       const snap = await db
         .collection("invites")
         .where("invitedByUid", "==", user.uid)
