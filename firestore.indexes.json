@@ -16,6 +16,15 @@
         { "fieldPath": "invitedByUid", "order": "ASCENDING" },
         { "fieldPath": "expiresAt", "order": "ASCENDING" }
       ]
+    },
+    {
+      "collectionGroup": "invites",
+      "queryScope": "COLLECTION",
+      "fields": [
+        { "fieldPath": "childId", "order": "ASCENDING" },
+        { "fieldPath": "invitedEmail", "order": "ASCENDING" },
+        { "fieldPath": "acceptedByUid", "order": "ASCENDING" }
+      ]
     }
   ],
   "fieldOverrides": []

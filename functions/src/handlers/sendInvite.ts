@@ -14,6 +14,15 @@
  *   3. Set `expiresAt` and `createdAt` server-side, so a bad clock on
  *      a client can't mint an invite that never expires.
  *
+ * Resend semantics ("delete and recreate"):
+ *   If an unaccepted invite already exists for the same
+ *   `(childId, invitedEmail)` pair (whether still live or already
+ *   expired), it is deleted in the same transaction that writes the
+ *   new one. Effect: calling sendInvite twice for the same target
+ *   yields a single fresh invite with a new token and a new 7-day
+ *   TTL, not two competing docs in the invitee's inbox. Accepted
+ *   invites are left alone as historical records.
+ *
  * Security contract:
  *   - Clients cannot write to `invites/{token}` directly (rules deny
  *     all client writes on the collection).
@@ -146,53 +155,73 @@ export const sendInvite = onCall<
 
   const db = getFirestore();
   const childRef = db.doc(`children/${childId}`);
-  const childSnap = await childRef.get();
-  const child = childSnap.exists ? (childSnap.data() as ChildDoc) : null;
+  const userRef = db.doc(`users/${callerUid}`);
 
-  const decision = decideSendInvite({
-    callerUid,
-    callerEmail,
-    childId,
-    invitedEmail,
-    child,
+  return db.runTransaction(async (tx) => {
+    const childSnap = await tx.get(childRef);
+    const child = childSnap.exists ? (childSnap.data() as ChildDoc) : null;
+
+    const decision = decideSendInvite({
+      callerUid,
+      callerEmail,
+      childId,
+      invitedEmail,
+      child,
+    });
+    if (decision.kind === "reject") {
+      throw new HttpsError(decision.code, decision.message);
+    }
+
+    // Find unaccepted invites for the same (childId, invitedEmail)
+    // pair. These get superseded: a resend replaces the old invite
+    // atomically rather than cluttering the inbox. The query
+    // deliberately does NOT filter by expiresAt — expired-but-
+    // unaccepted invites are also renewal candidates.
+    const supersedeQuery = db
+      .collection("invites")
+      .where("childId", "==", childId)
+      .where("invitedEmail", "==", decision.normalizedEmail)
+      .where("acceptedByUid", "==", null);
+    const supersedeSnap = await tx.get(supersedeQuery);
+
+    // Denormalise display name from the users/{uid} doc. If it's
+    // missing (edge case — trigger hasn't fired yet, or user doc was
+    // deleted), fall back to empty string so the invite still sends.
+    // displayName is cosmetic; the rule check uses invitedByUid.
+    const userSnap = await tx.get(userRef);
+    const invitedByDisplayName =
+      (userSnap.exists ? (userSnap.get("displayName") as string) : "") ?? "";
+
+    for (const doc of supersedeSnap.docs) {
+      tx.delete(doc.ref);
+    }
+
+    // We use Firestore's auto-id as the token. It's 20 chars of secure
+    // random alphabet — same property the old client path relied on.
+    const inviteRef = db.collection("invites").doc();
+    const token = inviteRef.id;
+    const expiresAt = Timestamp.fromMillis(Date.now() + INVITE_TTL_MS);
+
+    tx.set(inviteRef, {
+      childId,
+      childName: child?.name ?? "",
+      invitedByUid: callerUid,
+      invitedByDisplayName,
+      invitedEmail: decision.normalizedEmail,
+      expiresAt,
+      createdAt: FieldValue.serverTimestamp(),
+      acceptedByUid: null,
+      acceptedAt: null,
+    });
+
+    logger.info("[sendInvite] invite created", {
+      token,
+      callerUid,
+      childId,
+      invitedEmail: decision.normalizedEmail,
+      supersededCount: supersedeSnap.size,
+    });
+
+    return { token };
   });
-  if (decision.kind === "reject") {
-    throw new HttpsError(decision.code, decision.message);
-  }
-
-  // Denormalise display name from the users/{uid} doc. If it's
-  // missing (edge case — trigger hasn't fired yet, or user doc was
-  // deleted), fall back to empty string so the invite still sends.
-  // displayName is cosmetic; the rule check uses invitedByUid.
-  const userSnap = await db.doc(`users/${callerUid}`).get();
-  const invitedByDisplayName =
-    (userSnap.exists ? (userSnap.get("displayName") as string) : "") ?? "";
-
-  // We use Firestore's auto-id as the token. It's 20 chars of secure
-  // random alphabet — same property the old client path relied on.
-  const inviteRef = db.collection("invites").doc();
-  const token = inviteRef.id;
-
-  const expiresAt = Timestamp.fromMillis(Date.now() + INVITE_TTL_MS);
-
-  await inviteRef.set({
-    childId,
-    childName: child?.name ?? "",
-    invitedByUid: callerUid,
-    invitedByDisplayName,
-    invitedEmail: decision.normalizedEmail,
-    expiresAt,
-    createdAt: FieldValue.serverTimestamp(),
-    acceptedByUid: null,
-    acceptedAt: null,
-  });
-
-  logger.info("[sendInvite] invite created", {
-    token,
-    callerUid,
-    childId,
-    invitedEmail: decision.normalizedEmail,
-  });
-
-  return { token };
 });
