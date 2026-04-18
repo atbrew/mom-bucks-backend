@@ -109,17 +109,19 @@ class AdminClient:
             return list(auth.list_users(app=self.app).iterate_all())
 
     def get_user_by_email(self, email: str):
-        """Look up a user by email. Returns UserRecord or None."""
-        # UserNotFoundError is a normal-path signal (caller distinguishes
-        # "missing" from "error"), so it must be caught BEFORE the
-        # FirebaseError translation in _translate_admin_errors picks it up.
+        """Look up a user by email. Returns UserRecord or None.
+
+        ``UserNotFoundError`` is a normal-path signal (caller wants to
+        distinguish "missing" from "error"), so it's handled first and
+        independently of ``_translate_admin_errors`` — other SDK errors
+        still translate to ``AuthError`` for the CLI-wide handler.
+        """
         try:
-            with _translate_admin_errors():
-                return auth.get_user_by_email(email, app=self.app)
-        except AuthError as e:
-            if isinstance(e.__cause__, auth.UserNotFoundError):
-                return None
-            raise
+            return auth.get_user_by_email(email, app=self.app)
+        except auth.UserNotFoundError:
+            return None
+        except (ValueError, firebase_admin.exceptions.FirebaseError) as e:
+            raise AuthError(str(e)) from e
 
     def delete_user(self, uid: str) -> None:
         """Delete a Firebase Auth user. Raises on Admin SDK errors."""
@@ -159,7 +161,14 @@ class AdminClient:
         self.tracker.add_doc(path)
 
     def cleanup(self) -> None:
-        """Delete all tracked resources. Logs failures but does not raise."""
+        """Delete all tracked resources. Logs failures but does not raise.
+
+        Deliberately uses bare ``except Exception`` rather than
+        ``_translate_admin_errors`` — best-effort cleanup must never
+        surface an error that masks the test failure it's cleaning up
+        after. The CLI-wide ``AuthError`` handler is bypassed here on
+        purpose.
+        """
         for path in self.tracker.docs:
             try:
                 self.db.document(path).delete()

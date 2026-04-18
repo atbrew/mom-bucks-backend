@@ -76,6 +76,19 @@ def test_get_user_by_email_translates_other_firebase_errors():
             client.get_user_by_email("…")
 
 
+def test_get_user_by_email_reraises_non_notfound_firebase_error():
+    """A backend ``FirebaseError`` that ISN'T ``UserNotFoundError``
+    (e.g. ``PERMISSION_DENIED``) must still surface as ``AuthError``
+    — the "missing → None" shortcut applies ONLY to NotFound."""
+    client = _make_client()
+    err = firebase_admin.exceptions.FirebaseError(
+        code="PERMISSION_DENIED", message="forbidden",
+    )
+    with patch("mb.admin.auth.get_user_by_email", side_effect=err):
+        with pytest.raises(AuthError):
+            client.get_user_by_email("a@b.com")
+
+
 def test_delete_user_translates_value_error_into_auth_error():
     """``delete_user`` validates UID format and raises ``ValueError``
     on garbage input — same translation rule applies."""
@@ -84,3 +97,33 @@ def test_delete_user_translates_value_error_into_auth_error():
                side_effect=ValueError("UID must be a non-empty string")):
         with pytest.raises(AuthError):
             client.delete_user("")
+
+
+def test_list_users_translates_firebase_error_into_auth_error():
+    """``list_users`` is wrapped in ``_translate_admin_errors``; a
+    backend ``FirebaseError`` must come out as ``AuthError`` so the
+    CLI handler can render it as a one-line error."""
+    client = _make_client()
+    err = firebase_admin.exceptions.FirebaseError(
+        code="UNAVAILABLE", message="backend down",
+    )
+    with patch("mb.admin.auth.list_users", side_effect=err):
+        with pytest.raises(AuthError):
+            client.list_users()
+
+
+def test_recursive_delete_child_translates_firebase_error_into_auth_error():
+    """Same boundary applies to Firestore recursive-delete: a backend
+    error surfaces as ``AuthError``, not a raw Admin SDK exception."""
+    with patch("mb.admin.credentials.ApplicationDefault"), \
+         patch("mb.admin.firebase_admin.initialize_app", return_value=MagicMock()):
+        fake_db = MagicMock()
+        fake_db.recursive_delete.side_effect = (
+            firebase_admin.exceptions.FirebaseError(
+                code="PERMISSION_DENIED", message="forbidden",
+            )
+        )
+        with patch("mb.admin.firestore.client", return_value=fake_db):
+            client = AdminClient(project_id="test-project")
+    with pytest.raises(AuthError):
+        client.recursive_delete_child("child-X")
