@@ -39,7 +39,7 @@ import { getFirestore, FieldValue } from "../admin";
 
 export interface TransactionDoc {
   amount: number; // integer cents
-  type: "LODGE" | "WITHDRAW";
+  type: "LODGE" | "WITHDRAW" | "EARN";
   description?: string;
   createdByUid?: string;
 }
@@ -88,6 +88,13 @@ export const onTransactionCreate = onDocumentCreated(
         txnId,
         amount: txn.amount,
       });
+      return;
+    }
+
+    if (txn.type === "EARN") {
+      // claimActivity and vault callables apply the balance + version
+      // bump atomically in the same transaction that writes the EARN
+      // row, so the trigger has nothing left to do.
       return;
     }
 
