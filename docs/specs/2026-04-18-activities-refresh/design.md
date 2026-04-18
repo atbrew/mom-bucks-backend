@@ -341,7 +341,15 @@ Lifecycle states (within a configured vault):
 | `vault.unlockedAt` | `balance` vs `target` | State | What's allowed |
 |--------------------|-----------------------|-------|----------------|
 | `null` | `balance < target` | **Saving** | `depositToVault`, `claimInterest`, `getClaimableInterest` |
-| set | `balance == target` | **Unlocked** | `unlockVault` only. `claimInterest` / `depositToVault` reject. |
+| set | `balance >= target` | **Unlocked** | `unlockVault` only. `claimInterest` / `depositToVault` reject. |
+
+**Invariant:** `balance <= target` always holds. Interest payouts
+(§4.4) and match amounts (§4.6) are capped at `target - balance`, and
+`maxDeposit` is sized so `actualDeposit + match <= roomAfterInterest`.
+Under those caps, the unlock transition lands on `balance == target`
+exactly. The unlock check is written defensively as `balance >=
+target` so a future bug that ever overshoots still unlocks the
+vault instead of leaving it in an inconsistent state.
 
 **Critical invariants:**
 
