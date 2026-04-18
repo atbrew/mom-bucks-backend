@@ -302,15 +302,26 @@ def delete_account(ctx: click.Context, email: str, yes: bool) -> None:
             for cid, _ in sole_parent:
                 console.print(f"    - children/{cid}")
         if co_parented:
+            # Resolve other-parent UIDs to emails so the operator sees
+            # who the surviving co-parents actually are — UIDs alone
+            # aren't enough to tell whether the right access is being
+            # preserved. Admin is already available here, so there's
+            # no extra permission surface to worry about.
+            all_other_uids = [
+                u for _, parents in co_parented
+                for u in parents if u != user.uid
+            ]
+            other_emails = admin.get_emails_by_uid(all_other_uids)
             console.print(
                 f"  [yellow]Children left INTACT "
                 f"(co-parented): {len(co_parented)}[/yellow]"
             )
             for cid, parents in co_parented:
                 others = [u for u in parents if u != user.uid]
+                rendered = [other_emails.get(u, u) for u in others]
                 console.print(
                     f"    - children/{cid} "
-                    f"(co-parents: {', '.join(others) or '—'})"
+                    f"(co-parents: {', '.join(rendered) or '—'})"
                 )
         if not children:
             console.print("  Children: none")

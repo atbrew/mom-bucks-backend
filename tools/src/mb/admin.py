@@ -149,6 +149,38 @@ class AdminClient:
         with _translate_admin_errors():
             auth.delete_user(uid, app=self.app)
 
+    def get_emails_by_uid(self, uids: list[str]) -> dict[str, str]:
+        """Resolve a batch of UIDs to emails via the Admin SDK.
+
+        Returns `{uid: email}` for every uid that resolves and skips
+        the rest — missing records and users without an email address
+        both drop silently, because this is a display-layer helper
+        (``children list`` / co-parent warnings) not an identity
+        operation. Anything that matters for correctness should NOT
+        key off this.
+        """
+        if not uids:
+            return {}
+        # Deduplicate while preserving order (stable output for the
+        # table rendering layer).
+        seen: set[str] = set()
+        ordered: list[str] = []
+        for u in uids:
+            if u not in seen:
+                seen.add(u)
+                ordered.append(u)
+        out: dict[str, str] = {}
+        for uid in ordered:
+            try:
+                rec = auth.get_user(uid, app=self.app)
+            except auth.UserNotFoundError:
+                continue
+            except (ValueError, firebase_admin.exceptions.FirebaseError):
+                continue
+            if rec.email:
+                out[uid] = rec.email
+        return out
+
     def children_of(self, uid: str) -> list[tuple[str, list[str]]]:
         """Return ``(child_id, parent_uids)`` for every child doc that
         lists ``uid`` in ``parentUids``.

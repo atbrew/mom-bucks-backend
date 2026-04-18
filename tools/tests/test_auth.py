@@ -240,6 +240,10 @@ def test_delete_account_leaves_coparented_children_intact():
     mock_admin.get_user_by_email.return_value = fake_user
     # u1 co-parents child-B with u2.
     mock_admin.children_of.return_value = [("child-B", ["u1", "u2"])]
+    # Display helper resolves u2 → email for the intact-children
+    # warning. An empty dict would exercise the UID fallback; we want
+    # the happy path here.
+    mock_admin.get_emails_by_uid.return_value = {"u2": "u2@example.com"}
 
     with patch("mb.commands.auth.AdminClient", return_value=mock_admin):
         result = runner.invoke(main, [
@@ -253,8 +257,10 @@ def test_delete_account_leaves_coparented_children_intact():
     mock_admin.recursive_delete_child.assert_not_called()
     # Auth user still gets deleted.
     mock_admin.delete_user.assert_called_once_with("u1")
-    # Operator needs visibility into what was left behind.
+    # Operator needs visibility into what was left behind — co-parents
+    # render by email rather than UID.
     assert "child-B" in result.output
+    assert "u2@example.com" in result.output
 
 
 def test_delete_account_mixed_children_cascades_only_sole_parent():
@@ -274,6 +280,10 @@ def test_delete_account_mixed_children_cascades_only_sole_parent():
         ("child-sole", ["u1"]),
         ("child-shared", ["u1", "u2"]),
     ]
+    # Co-parent UIDs don't need to resolve for this test — falling
+    # back to UIDs is the documented behaviour when Admin can't find
+    # the record. Empty dict exercises that branch.
+    mock_admin.get_emails_by_uid.return_value = {}
 
     with patch("mb.commands.auth.AdminClient", return_value=mock_admin):
         result = runner.invoke(main, [

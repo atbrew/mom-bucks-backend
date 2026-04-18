@@ -1,7 +1,8 @@
-"""Children commands: create, list, update, delete."""
+"""Children commands: create, list, update, delete, remove-parent."""
 
 from __future__ import annotations
 
+import os
 from datetime import datetime, timezone
 
 import click
@@ -11,6 +12,35 @@ from rich.table import Table
 from ..client import FirestoreClient, ProjectConfig, sign_in
 
 console = Console()
+
+
+def _try_resolve_emails(
+    config: ProjectConfig, uids: list[str]
+) -> dict[str, str]:
+    """Best-effort UID → email resolution via the Admin SDK.
+
+    Returns `{uid: email}` for every uid we can resolve, and silently
+    drops the rest. Falls back to an empty dict if the Admin SDK
+    isn't usable (no SA key on dev/prod). The caller is expected to
+    render the raw UID for anything the map doesn't cover so the CLI
+    keeps working when no SA is configured.
+    """
+    if not uids:
+        return {}
+    sa_path = os.environ.get("GOOGLE_APPLICATION_CREDENTIALS")
+    if not config.emulator and not sa_path:
+        return {}
+    try:
+        from ..admin import AdminClient
+        admin = AdminClient(config.project_id, sa_path)
+        return admin.get_emails_by_uid(uids)
+    except Exception:
+        return {}
+
+
+def _format_parent(uid: str, emails: dict[str, str]) -> str:
+    """Render a parent entry as email if resolvable, else UID."""
+    return emails.get(uid, uid)
 
 
 def _get_client(ctx: click.Context) -> FirestoreClient:
@@ -118,21 +148,32 @@ def _make_child_table(title: str) -> Table:
     return table
 
 
-def _child_row(child_id: str, child: dict) -> tuple[str, ...]:
+def _child_row(
+    child_id: str,
+    child: dict,
+    emails: dict[str, str] | None = None,
+) -> tuple[str, ...]:
     parents = child.get("parentUids") or []
+    emails = emails or {}
+    rendered = [_format_parent(u, emails) for u in parents]
     return (
         child_id,
         child.get("name", "?"),
         _format_dob(child.get("dateOfBirth")),
         child.get("photoUrl") or "—",
-        ", ".join(parents) if parents else "—",
+        ", ".join(rendered) if rendered else "—",
         _format_euros(child.get("balance", 0)),
     )
 
 
-def _child_table(title: str, child_id: str, child: dict) -> Table:
+def _child_table(
+    title: str,
+    child_id: str,
+    child: dict,
+    emails: dict[str, str] | None = None,
+) -> Table:
     table = _make_child_table(title)
-    table.add_row(*_child_row(child_id, child))
+    table.add_row(*_child_row(child_id, child, emails))
     return table
 
 
@@ -173,12 +214,14 @@ def update_child(
         raise click.UsageError("Pass at least one of --name, --dob, --photo, --clear-photo.")
     if photo_path and clear_photo:
         raise click.UsageError("Cannot use --photo and --clear-photo together.")
+    config: ProjectConfig = ctx.obj["config"]
     client = _get_client(ctx)
     before = client.get_doc(f"children/{child_id}")
     if not before:
         console.print(f"[red]Child {child_id} not found.[/red]")
         raise SystemExit(1)
-    console.print(_child_table("Before", child_id, before))
+    emails = _try_resolve_emails(config, before.get("parentUids") or [])
+    console.print(_child_table("Before", child_id, before, emails))
     fields: dict = {}
     if name is not None:
         fields["name"] = name
@@ -204,7 +247,7 @@ def update_child(
             after = client.get_doc(f"children/{child_id}") or {}
     else:
         after = client.get_doc(f"children/{child_id}") or {}
-    console.print(_child_table("After", child_id, after))
+    console.print(_child_table("After", child_id, after, emails))
 
 
 @children_group.command("delete")
@@ -237,15 +280,19 @@ def delete_child(ctx: click.Context, child_id: str, yes: bool) -> None:
     parents = child.get("parentUids") or []
     co_parents = [u for u in parents if u != client.uid]
 
+    config: ProjectConfig = ctx.obj["config"]
+    emails = _try_resolve_emails(config, co_parents) if co_parents else {}
+
     console.print("[bold red]About to permanently delete:[/bold red]")
     console.print(f"  Child ID: {child_id}")
     console.print(f"  Name:     {child.get('name', '—')}")
     console.print(f"  DOB:      {_format_dob(child.get('dateOfBirth'))}")
     console.print(f"  Balance:  {_format_euros(child.get('balance', 0))}")
     if co_parents:
+        rendered = [_format_parent(u, emails) for u in co_parents]
         console.print(
             f"  [yellow]Co-parents (will lose access): "
-            f"{', '.join(co_parents)}[/yellow]"
+            f"{', '.join(rendered)}[/yellow]"
         )
 
     if not yes:
@@ -265,7 +312,14 @@ def delete_child(ctx: click.Context, child_id: str, yes: bool) -> None:
 @children_group.command("list")
 @click.pass_context
 def list_children(ctx: click.Context) -> None:
-    """List children for the current user."""
+    """List children for the current user.
+
+    Parent UIDs are resolved to emails via the Admin SDK when it is
+    usable (emulator, or ``GOOGLE_APPLICATION_CREDENTIALS`` set on
+    dev/prod). Falls back to UIDs otherwise so the command keeps
+    working for anyone without an SA key.
+    """
+    config: ProjectConfig = ctx.obj["config"]
     client = _get_client(ctx)
     children = client.query(
         "children", "parentUids", "ARRAY_CONTAINS", client.uid,
@@ -273,7 +327,92 @@ def list_children(ctx: click.Context) -> None:
     if not children:
         console.print("[dim]No children found.[/dim]")
         return
+    all_uids: list[str] = []
+    for child in children:
+        all_uids.extend(child.get("parentUids") or [])
+    emails = _try_resolve_emails(config, all_uids)
     table = _make_child_table("Children")
     for child in children:
-        table.add_row(*_child_row(child.get("_id", "?"), child))
+        table.add_row(*_child_row(child.get("_id", "?"), child, emails))
     console.print(table)
+
+
+@children_group.command("remove-parent")
+@click.option("--child-id", required=True, help="Child document ID.")
+@click.option(
+    "--target-email",
+    default=None,
+    help=(
+        "Email of the co-parent to remove. Resolved to a UID via the "
+        "Admin SDK — requires emulator mode or "
+        "GOOGLE_APPLICATION_CREDENTIALS on dev/prod."
+    ),
+)
+@click.option(
+    "--target-uid",
+    default=None,
+    help="UID of the co-parent to remove (bypasses Admin SDK lookup).",
+)
+@click.pass_context
+def remove_parent(
+    ctx: click.Context,
+    child_id: str,
+    target_email: str | None,
+    target_uid: str | None,
+) -> None:
+    """Remove a co-parent from a child via removeParentFromChildren.
+
+    Use this after an invite has already been accepted — revokeInvite
+    refuses to erase the audit trail, so access is removed at the
+    child level instead. The callable guards against orphaning (won't
+    remove the last parent).
+    """
+    if bool(target_email) == bool(target_uid):
+        raise click.UsageError(
+            "Pass exactly one of --target-email or --target-uid.",
+        )
+
+    config: ProjectConfig = ctx.obj["config"]
+    client = _get_client(ctx)
+
+    if target_email:
+        sa_path = os.environ.get("GOOGLE_APPLICATION_CREDENTIALS")
+        if not config.emulator and not sa_path:
+            raise click.UsageError(
+                "--target-email requires GOOGLE_APPLICATION_CREDENTIALS "
+                "on dev/prod. Pass --target-uid instead, or set the env "
+                "var.",
+            )
+        from ..admin import AdminClient
+        admin = AdminClient(config.project_id, sa_path)
+        rec = admin.get_user_by_email(target_email)
+        if rec is None:
+            console.print(
+                f"[red]No Firebase Auth user found for {target_email}[/red]"
+            )
+            raise SystemExit(1)
+        target_uid = rec.uid
+
+    assert target_uid is not None
+    result = client.call_function(
+        "removeParentFromChildren",
+        {"targetUid": target_uid, "childIds": [child_id]},
+    )
+    removed = result.get("removedFrom") or []
+    skipped = result.get("skipped") or []
+    target_label = target_email or target_uid
+    if child_id in removed:
+        console.print(
+            f"[green]Removed[/green] {target_label} from children/{child_id}."
+        )
+        return
+    # Per-child skips surface as a structured reason from the callable.
+    reason = next(
+        (s.get("reason") for s in skipped if s.get("childId") == child_id),
+        "UNKNOWN",
+    )
+    console.print(
+        f"[yellow]Not removed[/yellow] (reason: {reason}). "
+        "See removeParentFromChildren docs for what each reason means."
+    )
+    raise SystemExit(1)
