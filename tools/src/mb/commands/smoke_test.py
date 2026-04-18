@@ -55,7 +55,7 @@ def smoke_test(ctx: click.Context) -> None:
 
         # ── 3. Sign in as Alice ──────────────────────────────────
         console.print("\n[bold]3/12[/bold] Signing in as Alice…")
-        alice_token = sign_in(config,alice_email, password)
+        alice_token = sign_in(config, alice_email, password)
         alice_client = FirestoreClient(
             config, alice_token["idToken"], alice_uid,
         )
@@ -126,7 +126,7 @@ def smoke_test(ctx: click.Context) -> None:
 
         # ── 9. Bob signs in and lists his inbox ──────────────────
         console.print("\n[bold]9/12[/bold] Bob signs in + inbox list…")
-        bob_token = sign_in(config,bob_email, password)
+        bob_token = sign_in(config, bob_email, password)
         bob_client = FirestoreClient(
             config, bob_token["idToken"], bob_uid,
         )
