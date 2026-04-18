@@ -162,6 +162,11 @@ class AdminClient:
         (``children list`` / co-parent warnings) not an identity
         operation. Anything that matters for correctness should NOT
         key off this.
+
+        Uses ``auth.get_users`` (single batch request per 100 uids)
+        rather than per-uid ``auth.get_user`` calls, so a user with
+        several co-parents doesn't get N round-trips charged to what
+        is just a table-formatting step.
         """
         if not uids:
             return {}
@@ -173,16 +178,25 @@ class AdminClient:
             if u not in seen:
                 seen.add(u)
                 ordered.append(u)
+        # Admin SDK caps get_users at 100 identifiers per request.
         out: dict[str, str] = {}
-        for uid in ordered:
+        for i in range(0, len(ordered), 100):
+            chunk = ordered[i:i + 100]
             try:
-                rec = auth.get_user(uid, app=self.app)
-            except auth.UserNotFoundError:
-                continue
+                result = auth.get_users(
+                    [auth.UidIdentifier(u) for u in chunk],
+                    app=self.app,
+                )
             except (ValueError, firebase_admin.exceptions.FirebaseError):
+                # Batch-level failure (e.g. transient Admin SDK error)
+                # drops the whole chunk silently — this is a display
+                # helper, not an identity operation. Callers already
+                # handle missing entries via a UID fallback.
                 continue
-            if rec.email:
-                out[uid] = rec.email
+            found = {u.uid: u.email for u in result.users if u.email}
+            for uid in chunk:
+                if uid in found:
+                    out[uid] = found[uid]
         return out
 
     def children_of(self, uid: str) -> list[tuple[str, list[str]]]:
