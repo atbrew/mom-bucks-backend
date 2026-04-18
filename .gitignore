@@ -41,3 +41,8 @@ dist/
 .vscode/
 *.swp
 *.swo
+
+# Claude Code skills — symlinks are regenerated from skills-lock.json;
+# only track the skill sources in .agents/ and the local `release` skill.
+.claude/skills/*
+!.claude/skills/release/
