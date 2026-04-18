@@ -167,7 +167,7 @@ through three callables:
 
 | Callable | Effect | Caller constraint |
 |----------|--------|-------------------|
-| `sendInvite`   | Creates the doc, stamps `invitedByUid`, `createdAt`, `expiresAt`; denormalises names; lowercases `invitedEmail`. | Caller must be in `parentUids` of the target child. |
+| `sendInvite`   | Creates the doc, stamps `invitedByUid`, `createdAt`, `expiresAt`; denormalises names; lowercases `invitedEmail`. Runs in a transaction that also deletes any existing unaccepted invite for the same `(childId, invitedEmail)` pair — a resend supersedes the old token rather than creating inbox spam. | Caller must be in `parentUids` of the target child; cannot invite themselves (`invitedEmail` != caller email). |
 | `acceptInvite` | Sets `acceptedByUid`/`acceptedAt` and `arrayUnion`s the caller into the child's `parentUids`. | Caller must be signed in; invite must be unaccepted and unexpired. |
 | `revokeInvite` | Deletes the invite doc. | Caller must equal `invitedByUid`; invite must be unaccepted (accepted invites must be undone via `removeParentFromChildren`). |
 

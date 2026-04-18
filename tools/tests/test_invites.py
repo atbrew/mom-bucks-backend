@@ -31,7 +31,7 @@ def test_send_invite_calls_sendInvite_callable_not_direct_firestore():
             "--password", "pw",
             "send",
             "--child-id", "c1",
-            "--invitee-email", "Invitee@X.com",
+            "--email", "Invitee@X.com",
         ])
 
     assert result.exit_code == 0, result.output
