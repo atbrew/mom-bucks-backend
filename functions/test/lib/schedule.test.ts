@@ -1,6 +1,10 @@
 import { describe, expect, it } from "vitest";
 
-import { nextOccurrence, type Schedule } from "../../src/lib/schedule";
+import {
+  nextOccurrence,
+  parseSchedule,
+  type Schedule,
+} from "../../src/lib/schedule";
 
 type Row = {
   label: string;
@@ -214,5 +218,61 @@ describe("nextOccurrence", () => {
         ).toThrow(/MONTHLY\.dayOfMonth must be an integer in 1\.\.31/);
       });
     }
+  });
+});
+
+describe("parseSchedule", () => {
+  it("accepts a bare DAILY schedule", () => {
+    expect(parseSchedule({ kind: "DAILY" })).toEqual({
+      ok: true,
+      schedule: { kind: "DAILY" },
+    });
+  });
+
+  it("accepts a well-formed WEEKLY schedule", () => {
+    expect(parseSchedule({ kind: "WEEKLY", dayOfWeek: 6 })).toEqual({
+      ok: true,
+      schedule: { kind: "WEEKLY", dayOfWeek: 6 },
+    });
+  });
+
+  it("accepts a well-formed MONTHLY schedule", () => {
+    expect(parseSchedule({ kind: "MONTHLY", dayOfMonth: 15 })).toEqual({
+      ok: true,
+      schedule: { kind: "MONTHLY", dayOfMonth: 15 },
+    });
+  });
+
+  it("rejects non-objects", () => {
+    expect(parseSchedule(null).ok).toBe(false);
+    expect(parseSchedule("DAILY").ok).toBe(false);
+    expect(parseSchedule(42).ok).toBe(false);
+    expect(parseSchedule([{ kind: "DAILY" }]).ok).toBe(false);
+  });
+
+  it("rejects an unknown kind", () => {
+    const result = parseSchedule({ kind: "YEARLY" });
+    expect(result.ok).toBe(false);
+    if (!result.ok) expect(result.reason).toContain("unknown schedule kind");
+  });
+
+  it("rejects DAILY with extra keys (e.g. stale dayOfWeek)", () => {
+    const result = parseSchedule({ kind: "DAILY", dayOfWeek: 3 });
+    expect(result.ok).toBe(false);
+    if (!result.ok) expect(result.reason).toContain("unexpected keys");
+  });
+
+  it("rejects WEEKLY with dayOfWeek out of range", () => {
+    expect(parseSchedule({ kind: "WEEKLY", dayOfWeek: -1 }).ok).toBe(false);
+    expect(parseSchedule({ kind: "WEEKLY", dayOfWeek: 7 }).ok).toBe(false);
+    expect(parseSchedule({ kind: "WEEKLY", dayOfWeek: 2.5 }).ok).toBe(false);
+    expect(parseSchedule({ kind: "WEEKLY" }).ok).toBe(false);
+  });
+
+  it("rejects MONTHLY with dayOfMonth out of range or missing", () => {
+    expect(parseSchedule({ kind: "MONTHLY", dayOfMonth: 0 }).ok).toBe(false);
+    expect(parseSchedule({ kind: "MONTHLY", dayOfMonth: 32 }).ok).toBe(false);
+    expect(parseSchedule({ kind: "MONTHLY", dayOfMonth: 12.5 }).ok).toBe(false);
+    expect(parseSchedule({ kind: "MONTHLY" }).ok).toBe(false);
   });
 });
