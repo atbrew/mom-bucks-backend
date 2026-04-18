@@ -272,10 +272,15 @@ looks at other activities. Instead:
   so the pointer is set exactly once on create and cleared exactly
   once on delete.
 
-Rules-enforceable: on activity create with `type == 'ALLOWANCE'`,
-require `children.allowanceId` to be null *at the start* of the
-operation and set *at the end* — the callable does both writes in
-one transaction.
+Enforcement model: the "at most one ALLOWANCE per child" invariant
+is enforced by the **callable transaction**, not by Firestore rules
+(which don't run for Admin-SDK writes). `createActivity` reads
+`children.allowanceId` inside the transaction, rejects if it is
+already set, and writes both the new activity doc and the pointer
+atomically. `deleteActivity` clears the pointer in the same
+transaction that deletes the activity doc. Rules' role is narrower:
+they **deny direct client writes** to `children.allowanceId` (§6),
+so the pointer can only move via the callable-managed flow.
 
 UI benefit: the Android app reads `children.allowanceId` directly to
 render the pocket-money card; no `where('type', '==', 'ALLOWANCE')`
