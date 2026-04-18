@@ -1,6 +1,6 @@
 """Tests for `mb auth` commands.
 
-Exposes the bug that `mb auth auth create --name Alice` does not
+Exposes the bug that `mb auth create --name Alice` does not
 actually persist Alice as `displayName` on the user doc. The blocking
 `beforeUserCreated` trigger is unreliable for profile data from
 Admin-SDK-created users — the CLI must write displayName explicitly
@@ -136,7 +136,7 @@ def test_auth_login_error_routes_through_mbgroup():
 
 
 def test_delete_account_refuses_prod():
-    """`mb --project prod auth auth delete` must refuse outright.
+    """`mb --project prod auth delete` must refuse outright.
     This is the first (and strongest) of the defence-in-depth guards:
     no prompt, no flag — the command rejects the prod alias at the
     command level so a slip of `--project prod` cannot wipe a real
