@@ -40,10 +40,21 @@ def invites_group(ctx: click.Context, email: str, password: str) -> None:
 
 @invites_group.command("send")
 @click.option("--child-id", required=True, help="Child document ID.")
-@click.option("--invitee-email", required=True, help="Email of the person to invite.")
+@click.option(
+    "--email",
+    "invitee_email",
+    required=True,
+    help="Email of the person to invite.",
+)
 @click.pass_context
 def send_invite(ctx: click.Context, child_id: str, invitee_email: str) -> None:
-    """Send a co-parenting invite via the sendInvite callable."""
+    """Send a co-parenting invite via the sendInvite callable.
+
+    Note: the group-level ``--email`` (caller's login) is consumed by
+    the ``invites`` group before this subcommand runs, so ``--email``
+    here refers to the INVITEE's email. Click disambiguates by
+    position: ``mb invites --email me ... send --email them ...``.
+    """
     client = _get_client(ctx)
     result = client.call_function("sendInvite", {
         "childId": child_id,
