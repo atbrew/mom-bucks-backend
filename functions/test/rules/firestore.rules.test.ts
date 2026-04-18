@@ -110,7 +110,8 @@ async function seedChild(
       dateOfBirth: DEFAULT_SEED_DOB,
       createdAt: DEFAULT_SEED_CREATED_AT,
       balance: 0,
-      vaultBalance: 0,
+      allowanceId: null,
+      vault: null,
       parentUids,
       createdByUid: parentUids[0] ?? "system",
       version: 1,
@@ -209,7 +210,8 @@ describe("children/{childId}", () => {
           dateOfBirth: SAM_DOB,
           createdAt: serverTimestamp(),
           balance: 0,
-          vaultBalance: 0,
+          allowanceId: null,
+          vault: null,
           parentUids: ["alice"],
           createdByUid: "alice",
           version: 1,
@@ -225,7 +227,8 @@ describe("children/{childId}", () => {
           dateOfBirth: SAM_DOB,
           createdAt: serverTimestamp(),
           balance: 0,
-          vaultBalance: 0,
+          allowanceId: null,
+          vault: null,
           parentUids: ["bob"],
           createdByUid: "alice",
           version: 1,
@@ -241,7 +244,8 @@ describe("children/{childId}", () => {
           dateOfBirth: SAM_DOB,
           createdAt: serverTimestamp(),
           balance: 0,
-          vaultBalance: 0,
+          allowanceId: null,
+          vault: null,
           parentUids: [],
           createdByUid: "alice",
           version: 1,
@@ -260,7 +264,8 @@ describe("children/{childId}", () => {
           dateOfBirth: SAM_DOB,
           createdAt: serverTimestamp(),
           balance: 0,
-          vaultBalance: 0,
+          allowanceId: null,
+          vault: null,
           parentUids: ["alice", "bob"],
           createdByUid: "alice",
           version: 1,
@@ -276,7 +281,8 @@ describe("children/{childId}", () => {
           dateOfBirth: SAM_DOB,
           createdAt: serverTimestamp(),
           balance: 0,
-          vaultBalance: 0,
+          allowanceId: null,
+          vault: null,
           parentUids: ["alice"],
           createdByUid: "alice",
           version: 1,
@@ -299,7 +305,8 @@ describe("children/{childId}", () => {
             name: "Sam",
             createdAt: serverTimestamp(),
             balance: 0,
-            vaultBalance: 0,
+            allowanceId: null,
+            vault: null,
             parentUids: ["alice"],
             createdByUid: "alice",
             version: 1,
@@ -317,7 +324,8 @@ describe("children/{childId}", () => {
             dateOfBirth: "2018-05-01",
             createdAt: serverTimestamp(),
             balance: 0,
-            vaultBalance: 0,
+            allowanceId: null,
+            vault: null,
             parentUids: ["alice"],
             createdByUid: "alice",
             version: 1,
@@ -333,7 +341,8 @@ describe("children/{childId}", () => {
             dateOfBirth: SAM_DOB,
             createdAt: serverTimestamp(),
             balance: 0,
-            vaultBalance: 0,
+            allowanceId: null,
+            vault: null,
             parentUids: ["alice"],
             createdByUid: "alice",
             version: 1,
@@ -368,7 +377,8 @@ describe("children/{childId}", () => {
             name: "Sam",
             dateOfBirth: SAM_DOB,
             balance: 0,
-            vaultBalance: 0,
+            allowanceId: null,
+            vault: null,
             parentUids: ["alice"],
             createdByUid: "alice",
             version: 1,
@@ -384,7 +394,8 @@ describe("children/{childId}", () => {
             dateOfBirth: SAM_DOB,
             createdAt: "2025-01-01T09:30:00Z",
             balance: 0,
-            vaultBalance: 0,
+            allowanceId: null,
+            vault: null,
             parentUids: ["alice"],
             createdByUid: "alice",
             version: 1,
@@ -404,7 +415,8 @@ describe("children/{childId}", () => {
             dateOfBirth: SAM_DOB,
             createdAt: new Date("2020-01-01T00:00:00Z"),
             balance: 0,
-            vaultBalance: 0,
+            allowanceId: null,
+            vault: null,
             parentUids: ["alice"],
             createdByUid: "alice",
             version: 1,
@@ -420,7 +432,8 @@ describe("children/{childId}", () => {
             dateOfBirth: SAM_DOB,
             createdAt: serverTimestamp(),
             balance: 0,
-            vaultBalance: 0,
+            allowanceId: null,
+            vault: null,
             parentUids: ["alice"],
             createdByUid: "alice",
             version: 1,
@@ -449,7 +462,8 @@ describe("children/{childId}", () => {
             dateOfBirth: SAM_DOB,
             createdAt: serverTimestamp(),
             balance: 0,
-            vaultBalance: 0,
+            allowanceId: null,
+            vault: null,
             parentUids: ["alice"],
             createdByUid: "mallory",
             version: 1,
@@ -465,8 +479,92 @@ describe("children/{childId}", () => {
             dateOfBirth: SAM_DOB,
             createdAt: serverTimestamp(),
             balance: 0,
-            vaultBalance: 0,
+            allowanceId: null,
+            vault: null,
             parentUids: ["alice"],
+            version: 1,
+          }),
+        );
+      });
+    });
+
+    // ─── allowanceId + vault must be null on create ───────────────
+    //
+    // Both fields are Admin-SDK-managed post-create
+    // (createActivity / deleteActivity own allowanceId; the vault
+    // callables own vault). A client that pre-seeds either at
+    // child-create time would either forge the "at most one
+    // ALLOWANCE" invariant before any activity exists, or plant a
+    // vault map whose balance the vaultTransactions ledger never
+    // recorded. Rules force null on create.
+    describe("allowanceId / vault null-on-create guard", () => {
+      it("denies creating a child with a non-null allowanceId", async () => {
+        const alice = env.authenticatedContext("alice").firestore();
+        await assertFails(
+          setDoc(doc(alice, "children/sam"), {
+            name: "Sam",
+            dateOfBirth: SAM_DOB,
+            createdAt: serverTimestamp(),
+            balance: 0,
+            allowanceId: "forged-activity-id",
+            vault: null,
+            parentUids: ["alice"],
+            createdByUid: "alice",
+            version: 1,
+          }),
+        );
+      });
+
+      it("denies creating a child with a non-null vault map", async () => {
+        const alice = env.authenticatedContext("alice").firestore();
+        await assertFails(
+          setDoc(doc(alice, "children/sam"), {
+            name: "Sam",
+            dateOfBirth: SAM_DOB,
+            createdAt: serverTimestamp(),
+            balance: 0,
+            allowanceId: null,
+            vault: {
+              balance: 999,
+              target: 1000,
+              unlockedAt: null,
+              interest: null,
+              matching: null,
+            },
+            parentUids: ["alice"],
+            createdByUid: "alice",
+            version: 1,
+          }),
+        );
+      });
+
+      it("denies creating a child with no allowanceId field at all", async () => {
+        const alice = env.authenticatedContext("alice").firestore();
+        await assertFails(
+          setDoc(doc(alice, "children/sam"), {
+            name: "Sam",
+            dateOfBirth: SAM_DOB,
+            createdAt: serverTimestamp(),
+            balance: 0,
+            vault: null,
+            parentUids: ["alice"],
+            createdByUid: "alice",
+            version: 1,
+          }),
+        );
+      });
+
+      it("denies creating a child with no vault field at all", async () => {
+        const alice = env.authenticatedContext("alice").firestore();
+        await assertFails(
+          setDoc(doc(alice, "children/sam"), {
+            name: "Sam",
+            dateOfBirth: SAM_DOB,
+            createdAt: serverTimestamp(),
+            balance: 0,
+            allowanceId: null,
+            parentUids: ["alice"],
+            createdByUid: "alice",
             version: 1,
           }),
         );
@@ -660,6 +758,147 @@ describe("children/{childId}", () => {
       it("allows a name update that does not touch createdByUid", async () => {
         // Regression guard: ordinary field updates still go through.
         await seedChild("sam", ["alice"]);
+        const alice = env.authenticatedContext("alice").firestore();
+        await assertSucceeds(
+          updateDoc(doc(alice, "children/sam"), { name: "Samuel" }),
+        );
+      });
+    });
+
+    // ─── allowanceId is immutable from direct client writes ──────
+    //
+    // The pointer moves via createActivity / deleteActivity
+    // (Admin SDK). A direct client change would orphan the
+    // activities collection from the pointer or forge the "at
+    // most one ALLOWANCE per child" invariant.
+    describe("allowanceId pinned on update (client-direct)", () => {
+      it("denies a parent from setting allowanceId to a forged id", async () => {
+        await seedChild("sam", ["alice"]);
+        const alice = env.authenticatedContext("alice").firestore();
+        await assertFails(
+          updateDoc(doc(alice, "children/sam"), {
+            allowanceId: "forged-activity-id",
+          }),
+        );
+      });
+
+      it("denies a parent from nulling an already-set allowanceId", async () => {
+        await seedChild("sam", ["alice"], { allowanceId: "legit-act" });
+        const alice = env.authenticatedContext("alice").firestore();
+        await assertFails(
+          updateDoc(doc(alice, "children/sam"), {
+            allowanceId: null,
+          }),
+        );
+      });
+
+      it("allows a name update when allowanceId is already null", async () => {
+        await seedChild("sam", ["alice"]);
+        const alice = env.authenticatedContext("alice").firestore();
+        await assertSucceeds(
+          updateDoc(doc(alice, "children/sam"), { name: "Samuel" }),
+        );
+      });
+    });
+
+    // ─── vault is immutable from direct client writes ────────────
+    //
+    // The vault map is Admin-SDK-managed via the vault callables.
+    // A direct client write could desync `vault.balance` from the
+    // vaultTransactions ledger, flip `unlockedAt` to bypass the
+    // deposit callable, or raise `interest.weeklyRate` to mint
+    // interest payouts. The rule uses deep equality so both
+    // whole-map replacement AND nested field-path updates
+    // (`updateDoc(ref, 'vault.balance', 999)`) are refused.
+    describe("vault pinned on update (client-direct)", () => {
+      it("denies a parent from setting a non-null vault from scratch", async () => {
+        // Vault must be configured via Admin SDK (`mb vault configure`).
+        await seedChild("sam", ["alice"]);
+        const alice = env.authenticatedContext("alice").firestore();
+        await assertFails(
+          updateDoc(doc(alice, "children/sam"), {
+            vault: {
+              balance: 0,
+              target: 1000,
+              unlockedAt: null,
+              interest: null,
+              matching: null,
+            },
+          }),
+        );
+      });
+
+      it("denies a parent from nulling an already-configured vault", async () => {
+        const configuredVault = {
+          balance: 0,
+          target: 1000,
+          unlockedAt: null,
+          interest: null,
+          matching: null,
+        };
+        await seedChild("sam", ["alice"], { vault: configuredVault });
+        const alice = env.authenticatedContext("alice").firestore();
+        await assertFails(
+          updateDoc(doc(alice, "children/sam"), { vault: null }),
+        );
+      });
+
+      it("denies a nested field-path update to vault.balance", async () => {
+        // This is the key reason the helper uses deep equality, not
+        // `affectedKeys().hasAny(['vault'])`: a nested update reports
+        // affectedKeys = ['vault.balance'], which would slip past a
+        // top-level key check. Deep equality on the whole map catches
+        // it.
+        const configuredVault = {
+          balance: 0,
+          target: 1000,
+          unlockedAt: null,
+          interest: null,
+          matching: null,
+        };
+        await seedChild("sam", ["alice"], { vault: configuredVault });
+        const alice = env.authenticatedContext("alice").firestore();
+        await assertFails(
+          updateDoc(doc(alice, "children/sam"), {
+            "vault.balance": 99999,
+          }),
+        );
+      });
+
+      it("denies a nested field-path update that flips vault.unlockedAt", async () => {
+        const configuredVault = {
+          balance: 1000,
+          target: 1000,
+          unlockedAt: null, // not unlocked yet
+          interest: null,
+          matching: null,
+        };
+        await seedChild("sam", ["alice"], { vault: configuredVault });
+        const alice = env.authenticatedContext("alice").firestore();
+        await assertFails(
+          updateDoc(doc(alice, "children/sam"), {
+            "vault.unlockedAt": serverTimestamp(),
+          }),
+        );
+      });
+
+      it("allows a name update when vault is null (regression guard)", async () => {
+        await seedChild("sam", ["alice"]);
+        const alice = env.authenticatedContext("alice").firestore();
+        await assertSucceeds(
+          updateDoc(doc(alice, "children/sam"), { name: "Samuel" }),
+        );
+      });
+
+      it("allows a name update when vault is already configured and untouched", async () => {
+        const configuredVault = {
+          balance: 500,
+          target: 1000,
+          unlockedAt: null,
+          interest: null,
+          matching: null,
+        };
+        await seedChild("sam", ["alice"], { vault: configuredVault });
         const alice = env.authenticatedContext("alice").firestore();
         await assertSucceeds(
           updateDoc(doc(alice, "children/sam"), { name: "Samuel" }),
@@ -1060,31 +1299,125 @@ describe("children/{childId}/transactions/{txnId}", () => {
 });
 
 // ─── children/{childId}/activities/{activityId} ─────────────────────
+//
+// Under the activities + vault refresh (2026-04-18 design), activities
+// are a schedule-driven single-state model owned by four callables
+// (createActivity / updateActivity / deleteActivity / claimActivity).
+// Direct client writes are denied wholesale — the callables have to
+// pair every activity-doc write with a sibling write (allowanceId
+// pointer, main ledger EARN row, nextClaimAt recompute) that rules
+// can't compose atomically. Reads remain any-parent.
+
+async function seedActivity(
+  childId: string,
+  activityId: string,
+  extra: Record<string, unknown> = {},
+): Promise<void> {
+  await env.withSecurityRulesDisabled(async (ctx) => {
+    const db = ctx.firestore();
+    await setDoc(doc(db, `children/${childId}/activities/${activityId}`), {
+      title: "Take out the bins",
+      reward: 200,
+      type: "CHORE",
+      schedule: { kind: "WEEKLY", dayOfWeek: 6 },
+      nextClaimAt: new Date("2026-04-20T00:00:00Z"),
+      lastClaimedAt: null,
+      createdAt: new Date("2026-04-18T00:00:00Z"),
+      ...extra,
+    });
+  });
+}
 
 describe("children/{childId}/activities/{activityId}", () => {
-  it("allows a parent to create an activity", async () => {
-    await seedChild("sam", ["alice"]);
-    const alice = env.authenticatedContext("alice").firestore();
-    await assertSucceeds(
-      setDoc(doc(alice, "children/sam/activities/a1"), {
-        title: "Take out the bins",
-        reward: 200,
-        status: "OPEN",
-      }),
-    );
+  describe("read", () => {
+    it("allows a parent to read an activity", async () => {
+      await seedChild("sam", ["alice"]);
+      await seedActivity("sam", "a1");
+      const alice = env.authenticatedContext("alice").firestore();
+      await assertSucceeds(
+        getDoc(doc(alice, "children/sam/activities/a1")),
+      );
+    });
+
+    it("denies a non-parent from reading an activity", async () => {
+      await seedChild("sam", ["alice"]);
+      await seedActivity("sam", "a1");
+      const bob = env.authenticatedContext("bob").firestore();
+      await assertFails(getDoc(doc(bob, "children/sam/activities/a1")));
+    });
   });
 
-  it("denies a non-parent from reading an activity", async () => {
-    await seedChild("sam", ["alice"]);
-    await env.withSecurityRulesDisabled(async (ctx) => {
-      await setDoc(doc(ctx.firestore(), "children/sam/activities/a1"), {
-        title: "Homework",
-        reward: 100,
-        status: "OPEN",
-      });
+  // Every mutation below is denied. The callables (Admin SDK) bypass
+  // these rules; direct clients — even legitimate parents — must not
+  // write activities directly, otherwise the allowanceId pointer and
+  // nextClaimAt recompute invariants are unenforceable.
+  describe("write (denied wholesale)", () => {
+    it("denies a parent from creating an activity directly", async () => {
+      await seedChild("sam", ["alice"]);
+      const alice = env.authenticatedContext("alice").firestore();
+      await assertFails(
+        setDoc(doc(alice, "children/sam/activities/a1"), {
+          title: "Take out the bins",
+          reward: 200,
+          type: "CHORE",
+          schedule: { kind: "WEEKLY", dayOfWeek: 6 },
+          nextClaimAt: serverTimestamp(),
+          lastClaimedAt: null,
+          createdAt: serverTimestamp(),
+        }),
+      );
     });
-    const bob = env.authenticatedContext("bob").firestore();
-    await assertFails(getDoc(doc(bob, "children/sam/activities/a1")));
+
+    it("denies a parent from updating an activity directly", async () => {
+      await seedChild("sam", ["alice"]);
+      await seedActivity("sam", "a1");
+      const alice = env.authenticatedContext("alice").firestore();
+      await assertFails(
+        updateDoc(doc(alice, "children/sam/activities/a1"), {
+          title: "Renamed",
+        }),
+      );
+    });
+
+    it("denies a parent from bumping reward directly", async () => {
+      // The motivating case: a parent raises the reward. Must go
+      // through updateActivity (which also recomputes nextClaimAt
+      // atomically if the schedule changes in the same call).
+      await seedChild("sam", ["alice"]);
+      await seedActivity("sam", "a1");
+      const alice = env.authenticatedContext("alice").firestore();
+      await assertFails(
+        updateDoc(doc(alice, "children/sam/activities/a1"), {
+          reward: 500,
+        }),
+      );
+    });
+
+    it("denies a parent from deleting an activity directly", async () => {
+      // deleteActivity (Admin SDK) has to clear children.allowanceId
+      // in the same transaction. A direct delete would orphan the
+      // pointer.
+      await seedChild("sam", ["alice"]);
+      await seedActivity("sam", "a1");
+      const alice = env.authenticatedContext("alice").firestore();
+      await assertFails(deleteDoc(doc(alice, "children/sam/activities/a1")));
+    });
+
+    it("denies a non-parent from creating an activity", async () => {
+      await seedChild("sam", ["alice"]);
+      const bob = env.authenticatedContext("bob").firestore();
+      await assertFails(
+        setDoc(doc(bob, "children/sam/activities/a1"), {
+          title: "Heist",
+          reward: 9000,
+          type: "CHORE",
+          schedule: { kind: "DAILY" },
+          nextClaimAt: serverTimestamp(),
+          lastClaimedAt: null,
+          createdAt: serverTimestamp(),
+        }),
+      );
+    });
   });
 });
 
