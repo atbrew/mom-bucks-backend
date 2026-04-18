@@ -33,7 +33,13 @@ def _try_resolve_emails(
     try:
         from ..admin import AdminClient
         admin = AdminClient(config.project_id, sa_path)
-        return admin.get_emails_by_uid(uids)
+        try:
+            return admin.get_emails_by_uid(uids)
+        finally:
+            # Delete the Firebase app instance so a follow-up
+            # AdminClient in the same process doesn't collide on the
+            # `mb-admin-{project_id}` name.
+            admin.close()
     except Exception:
         return {}
 
@@ -385,7 +391,10 @@ def remove_parent(
             )
         from ..admin import AdminClient
         admin = AdminClient(config.project_id, sa_path)
-        rec = admin.get_user_by_email(target_email)
+        try:
+            rec = admin.get_user_by_email(target_email)
+        finally:
+            admin.close()
         if rec is None:
             console.print(
                 f"[red]No Firebase Auth user found for {target_email}[/red]"
