@@ -116,7 +116,9 @@ export function decideClaimActivity(params: {
   // crash the entire transaction with an opaque error. Parse once
   // here and surface a clear `failed-precondition` so the parent
   // gets a legible rejection.
-  if (typeof activity.title !== "string" || activity.title.length === 0) {
+  const trimmedTitle =
+    typeof activity.title === "string" ? activity.title.trim() : "";
+  if (trimmedTitle.length === 0) {
     return {
       kind: "reject",
       code: "failed-precondition",
@@ -135,7 +137,7 @@ export function decideClaimActivity(params: {
   const previousBalance = Number(child.balance ?? 0);
   return {
     kind: "accept",
-    title: activity.title,
+    title: trimmedTitle,
     reward: activity.reward,
     schedule: parsed.schedule,
     previousBalance,
