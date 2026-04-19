@@ -12,6 +12,7 @@
 import { onCall, HttpsError } from "firebase-functions/v2/https";
 import { logger } from "firebase-functions";
 import { getFirestore, FieldValue, Timestamp } from "../admin";
+import type { Vault } from "../lib/vault";
 
 export interface UnlockVaultRequest {
   childId: string;
@@ -19,19 +20,6 @@ export interface UnlockVaultRequest {
 
 export interface UnlockVaultResponse {
   released: number;
-}
-
-interface VaultInterest {
-  weeklyRate: number;
-  lastAccrualWrite: Timestamp;
-}
-
-interface Vault {
-  balance: number;
-  target: number;
-  unlockedAt: Timestamp | null;
-  interest: VaultInterest | null;
-  matching: { rate: number } | null;
 }
 
 interface ChildDoc {

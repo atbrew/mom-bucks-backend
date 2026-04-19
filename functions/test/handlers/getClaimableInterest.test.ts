@@ -30,7 +30,7 @@ describe("decideClaimableInterest", () => {
       child: { parentUids: [PARENT], vault: vault() as never },
       nowMs: NOW,
     });
-    expect(result).toEqual({ claimable: 100 });
+    expect(result).toEqual({ kind: "ok", claimable: 100 });
   });
 
   it("rejects with not-found when child is missing", () => {
@@ -40,7 +40,9 @@ describe("decideClaimableInterest", () => {
       nowMs: NOW,
     });
     expect(result).toEqual({
-      reject: { code: "not-found", message: "child does not exist" },
+      kind: "reject",
+      code: "not-found",
+      message: "child does not exist",
     });
   });
 
@@ -50,7 +52,7 @@ describe("decideClaimableInterest", () => {
       child: { parentUids: [PARENT], vault: vault() as never },
       nowMs: NOW,
     });
-    expect("reject" in result && result.reject.code).toBe("permission-denied");
+    expect(result.kind === "reject" && result.code).toBe("permission-denied");
   });
 
   it("returns 0 when vault is null", () => {
@@ -60,7 +62,7 @@ describe("decideClaimableInterest", () => {
         child: { parentUids: [PARENT] },
         nowMs: NOW,
       }),
-    ).toEqual({ claimable: 0 });
+    ).toEqual({ kind: "ok", claimable: 0 });
   });
 
   it("returns 0 when interest is disabled", () => {
@@ -73,7 +75,7 @@ describe("decideClaimableInterest", () => {
         },
         nowMs: NOW,
       }),
-    ).toEqual({ claimable: 0 });
+    ).toEqual({ kind: "ok", claimable: 0 });
   });
 
   it("returns 0 when the vault is unlocked", () => {
@@ -86,7 +88,7 @@ describe("decideClaimableInterest", () => {
         },
         nowMs: NOW,
       }),
-    ).toEqual({ claimable: 0 });
+    ).toEqual({ kind: "ok", claimable: 0 });
   });
 
   it("returns 0 when lastAccrualWrite is missing", () => {
@@ -101,6 +103,6 @@ describe("decideClaimableInterest", () => {
         },
         nowMs: NOW,
       }),
-    ).toEqual({ claimable: 0 });
+    ).toEqual({ kind: "ok", claimable: 0 });
   });
 });

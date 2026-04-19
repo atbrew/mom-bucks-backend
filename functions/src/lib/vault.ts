@@ -8,12 +8,36 @@
  * implement.
  */
 
+import type { Timestamp } from "firebase-admin/firestore";
+
+/**
+ * Vault subdocument shape carried on `children/{childId}.vault`. See
+ * schema.md for field semantics. Shared across the vault callables
+ * (`depositToVault`, `claimInterest`, `getClaimableInterest`,
+ * `unlockVault`) so they can't drift on a field name.
+ */
+export interface VaultInterest {
+  weeklyRate: number;
+  lastAccrualWrite: Timestamp;
+}
+
+export interface Vault {
+  balance: number;
+  target: number;
+  unlockedAt: Timestamp | null;
+  interest: VaultInterest | null;
+  matching: { rate: number } | null;
+}
+
+const MS_PER_DAY = 86_400_000;
+const MS_PER_WEEK = 7 * MS_PER_DAY;
+
 /**
  * Interest accrued on `balance` between `lastAccrualMs` and `nowMs`,
  * capped at `target - balance`, floored to whole cents.
  *
  * Mirrors design §4.3:
- *   accrued = balance * weeklyRate * (days / 7)
+ *   accrued = balance * weeklyRate * (elapsedMs / MS_PER_WEEK)
  *   cap     = max(0, target - balance)
  *   payout  = floor(min(accrued, cap))
  *
@@ -36,8 +60,11 @@ export function computeInterestPayout(params: {
   if (!(balance > 0)) return 0;
   const room = target - balance;
   if (room <= 0) return 0;
-  const days = elapsedMs / 86_400_000;
-  const accrued = balance * weeklyRate * (days / 7);
+  // Single-division form keeps the arithmetic in one float op rather
+  // than two separate (elapsedMs/DAY) and (days/7) divisions, which
+  // reduces rounding error at the extremes (very large balances or
+  // very long intervals).
+  const accrued = (balance * weeklyRate * elapsedMs) / MS_PER_WEEK;
   return Math.max(0, Math.floor(Math.min(accrued, room)));
 }
 

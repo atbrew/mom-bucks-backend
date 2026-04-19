@@ -18,6 +18,7 @@ import {
   computeInterestPayout,
   computeMatchAmount,
   computeMaxDeposit,
+  type Vault,
 } from "../lib/vault";
 
 export interface DepositToVaultRequest {
@@ -31,19 +32,6 @@ export interface DepositToVaultResponse {
   matched: number;
   remainedInMain: number;
   unlocked: boolean;
-}
-
-interface VaultInterest {
-  weeklyRate: number;
-  lastAccrualWrite: Timestamp;
-}
-
-interface Vault {
-  balance: number;
-  target: number;
-  unlockedAt: Timestamp | null;
-  interest: VaultInterest | null;
-  matching: { rate: number } | null;
 }
 
 interface ChildDoc {

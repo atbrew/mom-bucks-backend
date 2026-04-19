@@ -13,7 +13,7 @@
 import { onCall, HttpsError } from "firebase-functions/v2/https";
 import { logger } from "firebase-functions";
 import { getFirestore, FieldValue, Timestamp } from "../admin";
-import { computeInterestPayout } from "../lib/vault";
+import { computeInterestPayout, type Vault } from "../lib/vault";
 
 export interface ClaimInterestRequest {
   childId: string;
@@ -22,19 +22,6 @@ export interface ClaimInterestRequest {
 export interface ClaimInterestResponse {
   paid: number;
   unlocked: boolean;
-}
-
-interface VaultInterest {
-  weeklyRate: number;
-  lastAccrualWrite: Timestamp;
-}
-
-interface Vault {
-  balance: number;
-  target: number;
-  unlockedAt: Timestamp | null;
-  interest: VaultInterest | null;
-  matching: { rate: number } | null;
 }
 
 interface ChildDoc {

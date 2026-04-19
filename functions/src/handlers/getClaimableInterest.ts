@@ -11,8 +11,8 @@
  */
 
 import { onCall, HttpsError } from "firebase-functions/v2/https";
-import { getFirestore, Timestamp } from "../admin";
-import { computeInterestPayout } from "../lib/vault";
+import { getFirestore } from "../admin";
+import { computeInterestPayout, type Vault } from "../lib/vault";
 
 export interface GetClaimableInterestRequest {
   childId: string;
@@ -22,50 +22,41 @@ export interface GetClaimableInterestResponse {
   claimable: number;
 }
 
-interface VaultInterest {
-  weeklyRate: number;
-  lastAccrualWrite: Timestamp;
-}
-
-interface Vault {
-  balance: number;
-  target: number;
-  unlockedAt: Timestamp | null;
-  interest: VaultInterest | null;
-  matching: { rate: number } | null;
-}
-
 interface ChildDoc {
   parentUids: string[];
   vault?: Vault | null;
 }
 
+export type ClaimableInterestDecision =
+  | { kind: "ok"; claimable: number }
+  | { kind: "reject"; code: HttpsError["code"]; message: string };
+
 export function decideClaimableInterest(params: {
   callerUid: string;
   child: ChildDoc | null | undefined;
   nowMs: number;
-}): { claimable: number } | { reject: { code: HttpsError["code"]; message: string } } {
+}): ClaimableInterestDecision {
   const { callerUid, child, nowMs } = params;
   if (!child) {
-    return { reject: { code: "not-found", message: "child does not exist" } };
+    return { kind: "reject", code: "not-found", message: "child does not exist" };
   }
   if (!child.parentUids?.includes(callerUid)) {
     return {
-      reject: {
-        code: "permission-denied",
-        message: "caller is not a parent of this child",
-      },
+      kind: "reject",
+      code: "permission-denied",
+      message: "caller is not a parent of this child",
     };
   }
   const vault = child.vault ?? null;
-  if (!vault) return { claimable: 0 };
-  if (vault.interest == null) return { claimable: 0 };
-  if (vault.unlockedAt != null) return { claimable: 0 };
+  if (!vault) return { kind: "ok", claimable: 0 };
+  if (vault.interest == null) return { kind: "ok", claimable: 0 };
+  if (vault.unlockedAt != null) return { kind: "ok", claimable: 0 };
 
   const lastAccrualMs = vault.interest.lastAccrualWrite?.toMillis?.();
-  if (typeof lastAccrualMs !== "number") return { claimable: 0 };
+  if (typeof lastAccrualMs !== "number") return { kind: "ok", claimable: 0 };
 
   return {
+    kind: "ok",
     claimable: computeInterestPayout({
       balance: Number(vault.balance ?? 0),
       weeklyRate: Number(vault.interest.weeklyRate ?? 0),
@@ -100,8 +91,8 @@ export const getClaimableInterest = onCall<
     child,
     nowMs: Date.now(),
   });
-  if ("reject" in result) {
-    throw new HttpsError(result.reject.code, result.reject.message);
+  if (result.kind === "reject") {
+    throw new HttpsError(result.code, result.message);
   }
   return { claimable: result.claimable };
 });
