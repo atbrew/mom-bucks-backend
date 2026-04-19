@@ -188,4 +188,31 @@ describe("nextOccurrence", () => {
       expect(next.getTime()).toBeGreaterThan(now.getTime());
     }
   });
+
+  // Refuse out-of-range MONTHLY.dayOfMonth values loudly instead of
+  // letting `Date.UTC` silently wrap into the previous month (for
+  // 0/negative) or resolve fractional days (for non-integers). The
+  // callable path has no way to recover from a bad `nextClaimAt`
+  // write, so this guard belongs on the pure function.
+  describe("MONTHLY.dayOfMonth validation", () => {
+    const now = new Date("2026-04-18T09:00:00Z");
+    const invalidCases: Array<{ label: string; dayOfMonth: number }> = [
+      { label: "0", dayOfMonth: 0 },
+      { label: "-1", dayOfMonth: -1 },
+      { label: "32", dayOfMonth: 32 },
+      { label: "1.5 (non-integer)", dayOfMonth: 1.5 },
+      { label: "NaN", dayOfMonth: Number.NaN },
+    ];
+    for (const c of invalidCases) {
+      it(`rejects dayOfMonth = ${c.label}`, () => {
+        expect(() =>
+          nextOccurrence(
+            { kind: "MONTHLY", dayOfMonth: c.dayOfMonth },
+            now,
+            DUBLIN,
+          ),
+        ).toThrow(/MONTHLY\.dayOfMonth must be an integer in 1\.\.31/);
+      });
+    }
+  });
 });

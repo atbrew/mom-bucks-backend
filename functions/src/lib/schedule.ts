@@ -13,42 +13,64 @@ type CivilParts = {
   weekday: 0 | 1 | 2 | 3 | 4 | 5 | 6;
 };
 
-const WEEKDAY_MAP: Record<string, 0 | 1 | 2 | 3 | 4 | 5 | 6> = {
-  Sun: 0,
-  Mon: 1,
-  Tue: 2,
-  Wed: 3,
-  Thu: 4,
-  Fri: 5,
-  Sat: 6,
-};
+// Intl.DateTimeFormat construction is surprisingly expensive — each
+// `new` call spins up an ICU locale object. `tzParts` is called ~3
+// times per `nextOccurrence` evaluation (direct + `tzMidnightUtc`'s
+// two-shot offset resolve), and `nextOccurrence` itself is called on
+// every activity create/update/claim, so we cache formatters by tz.
+// The set of timezones is small and stable (one per user, bounded by
+// the IANA zone database), so the cache will never grow unbounded.
+const TZ_FORMATTERS = new Map<string, Intl.DateTimeFormat>();
+
+function getFormatter(tz: string): Intl.DateTimeFormat {
+  let fmt = TZ_FORMATTERS.get(tz);
+  if (!fmt) {
+    fmt = new Intl.DateTimeFormat("en-GB", {
+      timeZone: tz,
+      hourCycle: "h23",
+      year: "numeric",
+      month: "2-digit",
+      day: "2-digit",
+      hour: "2-digit",
+      minute: "2-digit",
+      second: "2-digit",
+    });
+    TZ_FORMATTERS.set(tz, fmt);
+  }
+  return fmt;
+}
 
 function tzParts(date: Date, tz: string): CivilParts {
-  const fmt = new Intl.DateTimeFormat("en-GB", {
-    timeZone: tz,
-    hourCycle: "h23",
-    year: "numeric",
-    month: "2-digit",
-    day: "2-digit",
-    hour: "2-digit",
-    minute: "2-digit",
-    second: "2-digit",
-    weekday: "short",
-  });
+  const fmt = getFormatter(tz);
   const parts = fmt.formatToParts(date);
-  const get = (type: string): string =>
-    parts.find((p) => p.type === type)?.value ?? "";
-  const weekday = WEEKDAY_MAP[get("weekday")];
-  if (weekday === undefined) {
-    throw new Error(`Unexpected weekday from Intl: ${get("weekday")}`);
-  }
+  const p = Object.fromEntries(parts.map((part) => [part.type, part.value]));
+
+  const year = Number(p.year);
+  const month = Number(p.month);
+  const day = Number(p.day);
+
+  // Derive weekday numerically from the civil y/m/d we just extracted
+  // rather than parsing the localised "weekday" string. The
+  // `Intl.DateTimeFormat` weekday token is locale-sensitive and can
+  // vary across ICU versions / Node builds ("Sat" vs "Sab" vs "土");
+  // reconstructing a Date.UTC from the civil parts and reading
+  // `getUTCDay()` is deterministic regardless of locale.
+  const weekday = new Date(Date.UTC(year, month - 1, day)).getUTCDay() as
+    | 0
+    | 1
+    | 2
+    | 3
+    | 4
+    | 5
+    | 6;
+
   return {
-    year: Number(get("year")),
-    month: Number(get("month")),
-    day: Number(get("day")),
-    hour: Number(get("hour")),
-    minute: Number(get("minute")),
-    second: Number(get("second")),
+    year,
+    month,
+    day,
+    hour: Number(p.hour),
+    minute: Number(p.minute),
+    second: Number(p.second),
     weekday,
   };
 }
@@ -115,10 +137,21 @@ export function nextOccurrence(
       return tzMidnightUtc(year, month, day, tz);
     }
     case "MONTHLY": {
-      const thisMonthTarget = Math.min(
-        schedule.dayOfMonth,
-        lastDayOfMonth(p.year, p.month),
-      );
+      // Runtime guard: `Schedule.dayOfMonth` is typed as a raw
+      // `number` (kept wide so the same type round-trips across the
+      // Firestore client, which serialises to `number`). If the
+      // persisted value is out-of-range (0, negative, fractional,
+      // > 31, NaN), `Date.UTC` silently wraps to the previous month
+      // or fractional days — both of which would return a bogus
+      // "next occurrence" that the `claimActivity` callable would
+      // then stamp onto `nextClaimAt`. Refuse early instead.
+      const d = schedule.dayOfMonth;
+      if (!Number.isInteger(d) || d < 1 || d > 31) {
+        throw new Error(
+          `MONTHLY.dayOfMonth must be an integer in 1..31 (got ${d})`,
+        );
+      }
+      const thisMonthTarget = Math.min(d, lastDayOfMonth(p.year, p.month));
       const candidate = tzMidnightUtc(p.year, p.month, thisMonthTarget, tz);
       if (candidate.getTime() > now.getTime()) return candidate;
       let nextY = p.year;
@@ -127,10 +160,7 @@ export function nextOccurrence(
         nextM = 1;
         nextY += 1;
       }
-      const nextTarget = Math.min(
-        schedule.dayOfMonth,
-        lastDayOfMonth(nextY, nextM),
-      );
+      const nextTarget = Math.min(d, lastDayOfMonth(nextY, nextM));
       return tzMidnightUtc(nextY, nextM, nextTarget, tz);
     }
   }
