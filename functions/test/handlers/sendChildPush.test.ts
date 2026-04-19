@@ -105,6 +105,14 @@ describe("buildActivityCreatePush", () => {
     expect(payload?.title).toBe("Sam — new activity");
   });
 
+  it("falls back to a generic title when reward is zero", () => {
+    const payload = buildActivityCreatePush("c-sam", child, {
+      title: "chore",
+      reward: 0,
+    });
+    expect(payload?.title).toBe("Sam — new activity");
+  });
+
   it("falls back to description when title is empty", () => {
     const payload = buildActivityCreatePush("c-sam", child, {
       title: "",

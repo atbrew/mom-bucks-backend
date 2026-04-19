@@ -108,7 +108,9 @@ export function buildActivityCreatePush(
 
   const childName = child.name ?? "your child";
   const reward =
-    typeof activity.reward === "number" ? formatCents(activity.reward) : null;
+    typeof activity.reward === "number" && activity.reward > 0
+      ? formatCents(activity.reward)
+      : null;
   const title = reward
     ? `${childName} unlocked ${reward}`
     : `${childName} — new activity`;
