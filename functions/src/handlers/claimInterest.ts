@@ -149,6 +149,8 @@ export const claimInterest = onCall<
     const childUpdate: Record<string, unknown> = {
       "vault.balance": FieldValue.increment(decision.payout),
       "vault.interest.lastAccrualWrite": now,
+      lastTxnAt: FieldValue.serverTimestamp(),
+      version: FieldValue.increment(1),
     };
     if (decision.unlocks) {
       childUpdate["vault.unlockedAt"] = now;

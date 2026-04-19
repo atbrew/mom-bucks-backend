@@ -5,10 +5,11 @@
  * vault. Interest-first ordering: claims interest first, then sizes
  * the deposit against the post-interest room, then sizes the optional
  * match against the remaining room, then atomically unlocks the vault
- * if `balance >= target` afterwards. Vault-side state is all updated
- * in a single transaction; the main `child.balance` decrement rides on
- * the WITHDRAW row through `onTransactionCreate` (same pattern as
- * `revertTransaction`) so we don't double-debit.
+ * if `balance >= target` afterwards. All state — main balance, vault
+ * balance, ledger rows — lands in a single Firestore transaction. The
+ * main-ledger WITHDRAW row is tagged `source: 'VAULT_DEPOSIT'` so
+ * `onTransactionCreate` skips re-applying the balance delta (the
+ * transaction here already did it).
  */
 
 import { onCall, HttpsError } from "firebase-functions/v2/https";
@@ -229,6 +230,7 @@ export const depositToVault = onCall<
     if (decision.actualDeposit > 0) {
       tx.create(mainTxnsRef.doc(), {
         type: "WITHDRAW",
+        source: "VAULT_DEPOSIT",
         amount: decision.actualDeposit,
         description: "Vault deposit",
         createdByUid: callerUid,
@@ -248,14 +250,18 @@ export const depositToVault = onCall<
       }
     }
 
-    // Main `child.balance` is decremented by `onTransactionCreate`
-    // when it picks up the WITHDRAW row — do NOT bump it here or the
-    // amount will be double-debited.
+    // Main `child.balance` is decremented inline in this same
+    // transaction. `onTransactionCreate` sees the WITHDRAW row's
+    // `source: 'VAULT_DEPOSIT'` tag and skips — otherwise the amount
+    // would be double-debited.
     const childUpdate: Record<string, unknown> = {};
     const vaultBalanceDelta =
       decision.interestClaimed + decision.actualDeposit + decision.matchAmount;
     if (vaultBalanceDelta > 0) {
       childUpdate["vault.balance"] = FieldValue.increment(vaultBalanceDelta);
+    }
+    if (decision.actualDeposit > 0) {
+      childUpdate.balance = FieldValue.increment(-decision.actualDeposit);
     }
     if (decision.advanceInterestClock) {
       childUpdate["vault.interest.lastAccrualWrite"] = now;
@@ -264,6 +270,8 @@ export const depositToVault = onCall<
       childUpdate["vault.unlockedAt"] = now;
     }
     if (Object.keys(childUpdate).length > 0) {
+      childUpdate.lastTxnAt = FieldValue.serverTimestamp();
+      childUpdate.version = FieldValue.increment(1);
       tx.update(childRef, childUpdate);
     }
 
