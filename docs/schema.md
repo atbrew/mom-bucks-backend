@@ -44,7 +44,7 @@ rules can do `request.auth.uid == uid` without a lookup.
 | `email`       | `string`         | Mirrors Firebase Auth, denormalised here. |
 | `photoUrl`    | `string \| null` | Path in Storage or null.                  |
 | `fcmTokens`   | `string[]`       | Device push tokens for FCM fan-out.       |
-| `timezone`    | `string`         | IANA timezone (e.g. `Europe/Dublin`, `America/New_York`). Drives civil-date boundaries for activity schedules — `claimActivity`, `createActivity`, and `updateActivity` read the acting parent's timezone to compute `nextClaimAt`. Defaults to `Europe/Dublin` on user create. |
+| `timezone`    | `string`         | IANA timezone (e.g. `Europe/Dublin`, `America/New_York`). Drives civil-date boundaries for activity schedules — `claimActivity`, `createActivity`, and `updateActivity` read the acting parent's timezone to compute `nextClaimAt`. Clients should default this to `Europe/Dublin` when creating a user doc; rules do not enforce presence, so the field may be absent until a client or callable writes it (the activity callables fall back to `Europe/Dublin` when the user doc is missing or the field is blank). |
 | `createdAt`   | `Timestamp`      | Server timestamp at user creation.        |
 
 **Ownership:** A user doc is created on first sign-in. The owning user
@@ -120,7 +120,7 @@ Schedule-driven, single-state model. An activity is claimable iff
 `nextClaimAt <= now` in the acting parent's timezone — there is no
 `status` field, no scheduled function to flip state, and no
 post-claim bookkeeping beyond advancing `nextClaimAt`. See
-`/Users/atbrew/Development/mom-bucks-backend/docs/specs/2026-04-18-activities-refresh/design.md`
+[`docs/specs/2026-04-18-activities-refresh/design.md`](specs/2026-04-18-activities-refresh/design.md)
 for the full rationale.
 
 All activity writes flow through callables (`createActivity`,

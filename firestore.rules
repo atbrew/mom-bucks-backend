@@ -126,8 +126,19 @@ service cloud.firestore {
     // Direct client writes must not touch it, otherwise a client
     // could forge a stale activityId and break the uniqueness
     // invariant downstream.
+    //
+    // Uses `diff().affectedKeys()` for two reasons: (1) consistency
+    // with the other "pin this key" helpers above
+    // (`parentUidsUnchanged`, `createdAtUnchanged`,
+    // `createdByUidUnchanged`, `txnCoreUnchanged`); and (2)
+    // direct access (`resource.data.allowanceId`) would error out
+    // on any legacy doc where the field is missing, blocking even
+    // innocuous updates like a name change. affectedKeys() treats
+    // missing-before/missing-after as "not affected" so the rule
+    // stays open on unrelated edits.
     function allowanceIdUnchanged() {
-      return request.resource.data.allowanceId == resource.data.allowanceId;
+      return !(request.resource.data.diff(resource.data).affectedKeys()
+                .hasAny(['allowanceId']));
     }
 
     // True iff an update leaves the `vault` map exactly as it was.
@@ -145,8 +156,19 @@ service cloud.firestore {
     // top-level key check. Comparing the pre- and post-write map
     // values catches both whole-map replacement and nested-path
     // mutation.
+    //
+    // Uses `.get('vault', null)` on both sides instead of direct
+    // `resource.data.vault` access. Direct access errors out on
+    // any doc where the field is missing — which would block
+    // unrelated name/balance updates on legacy records that
+    // predate the schema refresh. Defaulting missing-to-null keeps
+    // the equality check valid: missing == missing passes,
+    // missing → non-null correctly fails (the client must not
+    // materialise a vault map without going through the
+    // Admin-SDK callables).
     function vaultUnchanged() {
-      return request.resource.data.vault == resource.data.vault;
+      return request.resource.data.get('vault', null) ==
+             resource.data.get('vault', null);
     }
 
     // ─────────────────────────────────────────────────────────────────
@@ -222,12 +244,23 @@ service cloud.firestore {
       // any non-null shape they write would immediately diverge
       // from the vaultTransactions ledger (balance, interest
       // clock, etc. all have invariants the callables own).
+      // `keys().hasAll(['allowanceId', 'vault'])` is load-bearing
+      // on top of the `== null` checks: without explicit
+      // key-presence, a client could omit either field entirely
+      // and the `... == null` comparison on a missing key still
+      // evaluates to true (rules treat missing fields as null
+      // in equality expressions, not as a type error). Explicit
+      // key-presence forces the client to stamp both fields to
+      // null on create, so a later `allowanceIdUnchanged()` /
+      // `vaultUnchanged()` check on update has a stable
+      // pre-state to diff against.
       allow create: if isSignedIn()
                     && request.resource.data.parentUids is list
                     && request.resource.data.parentUids.size() == 1
                     && request.resource.data.parentUids[0] == request.auth.uid
                     && request.resource.data.createdByUid == request.auth.uid
                     && request.resource.data.dateOfBirth is timestamp
+                    && request.resource.data.keys().hasAll(['allowanceId', 'vault'])
                     && request.resource.data.allowanceId == null
                     && request.resource.data.vault == null
                     && createdAtValidOnCreate();
