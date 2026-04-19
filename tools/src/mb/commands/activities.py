@@ -198,7 +198,7 @@ def delete_activity(
 @click.option("--activity-id", required=True, help="Activity document ID.")
 @click.pass_context
 def claim_activity(ctx: click.Context, child_id: str, activity_id: str) -> None:
-    """Claim an activity (calls claimActivity; writes EARN + advances clock)."""
+    """Claim an activity (calls claimActivity; writes LODGE + advances clock)."""
     client = _get_client(ctx)
     result = client.call_function("claimActivity", {
         "childId": child_id,
