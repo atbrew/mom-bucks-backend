@@ -3,6 +3,108 @@ export type Schedule =
   | { kind: "WEEKLY"; dayOfWeek: 0 | 1 | 2 | 3 | 4 | 5 | 6 }
   | { kind: "MONTHLY"; dayOfMonth: number };
 
+export type ParseScheduleResult =
+  | { ok: true; schedule: Schedule }
+  | { ok: false; reason: string };
+
+/**
+ * Fallback IANA timezone used when a user's `timezone` field is
+ * missing, empty, not a string, or invalid. Matches the default
+ * documented in schema.md for `users/{uid}.timezone`.
+ */
+export const DEFAULT_TIMEZONE = "Europe/Dublin";
+
+/**
+ * Returns a valid IANA timezone string: either `raw` if it is a
+ * non-empty string that `Intl.DateTimeFormat` accepts, or
+ * `DEFAULT_TIMEZONE` otherwise. Never throws.
+ *
+ * Why: activity callables (`createActivity`, `updateActivity`,
+ * `claimActivity`) read the acting parent's timezone from
+ * `users/{uid}.timezone` and feed it straight into
+ * `nextOccurrence` → `Intl.DateTimeFormat`. A legacy or blank user
+ * doc, or a hand-edited bad IANA string, would otherwise crash the
+ * callable transaction with a RangeError — failing the parent's
+ * unrelated claim / schedule edit. Clamping to the default keeps
+ * the callable usable while the CLI / product can surface a "set
+ * your timezone" UI separately.
+ */
+export function resolveTimezone(raw: unknown): string {
+  if (typeof raw !== "string" || raw.length === 0) {
+    return DEFAULT_TIMEZONE;
+  }
+  try {
+    // Constructing the formatter is the cheapest way to validate:
+    // V8 throws `RangeError: Invalid time zone specified` for
+    // anything ICU doesn't recognise.
+    new Intl.DateTimeFormat("en-GB", { timeZone: raw });
+    return raw;
+  } catch {
+    return DEFAULT_TIMEZONE;
+  }
+}
+
+const ALLOWED_KEYS: Record<Schedule["kind"], ReadonlyArray<string>> = {
+  DAILY: ["kind"],
+  WEEKLY: ["kind", "dayOfWeek"],
+  MONTHLY: ["kind", "dayOfMonth"],
+};
+
+function isPlainObject(value: unknown): value is Record<string, unknown> {
+  return (
+    typeof value === "object" &&
+    value !== null &&
+    !Array.isArray(value) &&
+    Object.getPrototypeOf(value) === Object.prototype
+  );
+}
+
+function extraKeys(raw: Record<string, unknown>, allowed: ReadonlyArray<string>): string[] {
+  return Object.keys(raw).filter((k) => !allowed.includes(k));
+}
+
+/**
+ * Validates a caller-supplied schedule payload. Returns the typed
+ * Schedule on success, or an explanation on failure — the caller is
+ * responsible for translating a rejection into an HttpsError.
+ */
+export function parseSchedule(raw: unknown): ParseScheduleResult {
+  if (!isPlainObject(raw)) {
+    return { ok: false, reason: "schedule must be an object" };
+  }
+  const kind = raw.kind;
+  if (kind === "DAILY") {
+    const extras = extraKeys(raw, ALLOWED_KEYS.DAILY);
+    if (extras.length > 0) {
+      return { ok: false, reason: `unexpected keys on DAILY schedule: ${extras.join(", ")}` };
+    }
+    return { ok: true, schedule: { kind: "DAILY" } };
+  }
+  if (kind === "WEEKLY") {
+    const extras = extraKeys(raw, ALLOWED_KEYS.WEEKLY);
+    if (extras.length > 0) {
+      return { ok: false, reason: `unexpected keys on WEEKLY schedule: ${extras.join(", ")}` };
+    }
+    const dow = raw.dayOfWeek;
+    if (typeof dow !== "number" || !Number.isInteger(dow) || dow < 0 || dow > 6) {
+      return { ok: false, reason: "dayOfWeek must be an integer 0–6" };
+    }
+    return { ok: true, schedule: { kind: "WEEKLY", dayOfWeek: dow as 0 | 1 | 2 | 3 | 4 | 5 | 6 } };
+  }
+  if (kind === "MONTHLY") {
+    const extras = extraKeys(raw, ALLOWED_KEYS.MONTHLY);
+    if (extras.length > 0) {
+      return { ok: false, reason: `unexpected keys on MONTHLY schedule: ${extras.join(", ")}` };
+    }
+    const dom = raw.dayOfMonth;
+    if (typeof dom !== "number" || !Number.isInteger(dom) || dom < 1 || dom > 31) {
+      return { ok: false, reason: "dayOfMonth must be an integer 1–31" };
+    }
+    return { ok: true, schedule: { kind: "MONTHLY", dayOfMonth: dom } };
+  }
+  return { ok: false, reason: `unknown schedule kind: ${String(kind)}` };
+}
+
 type CivilParts = {
   year: number;
   month: number;
