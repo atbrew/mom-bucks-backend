@@ -13,7 +13,7 @@
  *   #16 onChildDelete            — Firestore trigger (cascade cleanup)
  *   #17 sendHabitNotifications   — scheduled (replaces APScheduler)
  *   #18 onTransactionPush        — Firestore trigger (FCM fan-out on transaction)
- *   #18 onActivityPush           — Firestore trigger (FCM fan-out on activity)
+ *   #18 onActivityCreate         — Firestore trigger (FCM fan-out on activity create)
  *       onProfileImageUpload     — Storage trigger (resize + photoUrl update)
  *       onUserCreated            — Auth trigger (create users/{uid} doc)
  *       onUserDeleted            — Auth trigger (delete users/{uid}/profile.jpg)
@@ -37,7 +37,7 @@ export { unlockVault } from "./handlers/unlockVault";
 export { onTransactionCreate } from "./handlers/onTransactionCreate";
 export { onChildDelete } from "./handlers/onChildDelete";
 export { sendHabitNotifications } from "./handlers/sendHabitNotifications";
-export { onTransactionPush, onActivityPush } from "./handlers/sendChildPush";
+export { onTransactionPush, onActivityCreate } from "./handlers/sendChildPush";
 export { onProfileImageUpload } from "./handlers/onProfileImageUpload";
 export { onUserCreated } from "./handlers/onUserCreated";
 export { onUserDeleted } from "./handlers/onUserDeleted";
