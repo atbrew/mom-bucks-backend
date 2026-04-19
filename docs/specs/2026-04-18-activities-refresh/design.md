@@ -151,7 +151,8 @@ On `claimActivity`:
 2. Verify `activity.nextClaimAt <= now`.
 3. In a single Firestore transaction:
    - Append a row to `children/{childId}/transactions` with
-     `type: 'EARN'`, `amount: activity.reward`,
+     `type: 'LODGE'`, `source: 'ACTIVITY'`,
+     `amount: activity.reward`,
      `description: activity.title`, `createdByUid: caller`,
      `createdAt: serverTimestamp()`.
    - Update `activity.nextClaimAt = nextOccurrence(schedule, now, actingParentTz)`.
@@ -530,9 +531,9 @@ Transaction:
    - `released = vault.balance`.
    - Append vault ledger row: `type: 'UNLOCK'`, `amount: released`.
    - `child.balance += released` (main ledger).
-   - Append main ledger row: `type: 'EARN'`, `amount: released`,
-     `description: 'Vault unlocked'`, `createdByUid: caller`,
-     `createdAt: serverTimestamp()`.
+   - Append main ledger row: `type: 'LODGE'`, `source: 'VAULT_UNLOCK'`,
+     `amount: released`, `description: 'Vault unlocked'`,
+     `createdByUid: caller`, `createdAt: serverTimestamp()`.
    - `vault.balance = 0`.
    - `vault.unlockedAt = null`.
    - If `vault.interest != null`: reset
