@@ -186,7 +186,8 @@ def get_balance(ctx: click.Context, child_id: str) -> None:
         console.print(f"[red]Child {child_id} not found.[/red]")
         raise SystemExit(1)
     balance = doc.get("balance", 0)
-    vault = doc.get("vaultBalance", 0)
+    vault = doc.get("vault") or {}
+    vault_balance = vault.get("balance", 0) if isinstance(vault, dict) else 0
     console.print(f"[bold]{doc.get('name', '?')}[/bold]")
     console.print(f"  Balance:      \u20ac{balance / 100:.2f}")
-    console.print(f"  Vault:        \u20ac{vault / 100:.2f}")
+    console.print(f"  Vault:        \u20ac{vault_balance / 100:.2f}")

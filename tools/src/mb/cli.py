@@ -14,12 +14,14 @@ import os
 import click
 
 from .client import AuthError, FirestoreError, get_project_config
+from .commands.admin import admin_group
 from .commands.auth import auth_group
 from .commands.children import children_group
 from .commands.transactions import transactions_group
 from .commands.activities import activities_group
 from .commands.invites import invites_group
 from .commands.smoke_test import smoke_test
+from .commands.vault import vault_group
 
 
 class MbGroup(click.Group):
@@ -71,9 +73,11 @@ def main(ctx: click.Context, project: str) -> None:
         )
 
 
+main.add_command(admin_group)
 main.add_command(auth_group)
 main.add_command(children_group)
 main.add_command(transactions_group)
 main.add_command(activities_group)
 main.add_command(invites_group)
 main.add_command(smoke_test)
+main.add_command(vault_group)
