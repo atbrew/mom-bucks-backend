@@ -1395,6 +1395,36 @@ describe("children/{childId}/transactions/{txnId}", () => {
       );
     });
 
+    // Retroactive-tagging forgery guard: a parent writes a plain
+    // client-path LODGE (no `source`), then tries to retroactively add
+    // `source: 'ACTIVITY'` via updateDoc. Once `onTransactionCreate`
+    // starts skipping balance recompute on sourced rows (slice 4),
+    // this would become a free-money exploit path if unblocked.
+    // `txnCoreUnchanged()` catches it because `affectedKeys()` includes
+    // keys added post-create — pin that with an explicit test so the
+    // guarantee doesn't quietly regress.
+    it("denies an update that adds source to a parent-written row", async () => {
+      await seedChild("sam", ["alice"]);
+      await env.withSecurityRulesDisabled(async (ctx) => {
+        await setDoc(
+          doc(ctx.firestore(), "children/sam/transactions/t1"),
+          {
+            amount: 500,
+            type: "LODGE",
+            description: "pocket money",
+            createdByUid: "alice",
+            createdAt: new Date("2025-06-01T14:22:00Z"),
+          },
+        );
+      });
+      const alice = env.authenticatedContext("alice").firestore();
+      await assertFails(
+        updateDoc(doc(alice, "children/sam/transactions/t1"), {
+          source: "ACTIVITY",
+        }),
+      );
+    });
+
     it("allows a client-path create with no source field (parent-initiated LODGE)", async () => {
       await seedChild("sam", ["alice"]);
       const alice = env.authenticatedContext("alice").firestore();

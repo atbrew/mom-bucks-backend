@@ -427,7 +427,8 @@ service cloud.firestore {
       //   update → updateActivity  (title / reward / schedule only;
       //                             schedule edits recompute
       //                             nextClaimAt atomically)
-      //   claim  → claimActivity   (writes a main-ledger `EARN` row,
+      //   claim  → claimActivity   (writes a main-ledger `LODGE` row
+      //                             tagged `source: 'ACTIVITY'`,
       //                             bumps `child.balance`, and
       //                             advances `nextClaimAt` — all in
       //                             one transaction)
