@@ -11,7 +11,12 @@
 import { onCall, HttpsError } from "firebase-functions/v2/https";
 import { logger } from "firebase-functions";
 import { getFirestore, FieldValue, Timestamp } from "../admin";
-import { nextOccurrence, type Schedule } from "../lib/schedule";
+import {
+  nextOccurrence,
+  parseSchedule,
+  resolveTimezone,
+  type Schedule,
+} from "../lib/schedule";
 
 // ─── Types ──────────────────────────────────────────────────────────
 
@@ -102,12 +107,37 @@ export function decideClaimActivity(params: {
     };
   }
 
+  // Runtime validation of the schedule + title. Rules deny direct
+  // writes to activities, so in normal operation these fields are
+  // callable-owned and well-formed. But the Admin-SDK backfill or
+  // a migration bug could still plant a doc with a bogus schedule
+  // (missing `kind`, wrong map shape) or a non-string title — and
+  // feeding a malformed schedule into `nextOccurrence` below would
+  // crash the entire transaction with an opaque error. Parse once
+  // here and surface a clear `failed-precondition` so the parent
+  // gets a legible rejection.
+  if (typeof activity.title !== "string" || activity.title.length === 0) {
+    return {
+      kind: "reject",
+      code: "failed-precondition",
+      message: "activity has a missing or invalid title",
+    };
+  }
+  const parsed = parseSchedule(activity.schedule);
+  if (!parsed.ok) {
+    return {
+      kind: "reject",
+      code: "failed-precondition",
+      message: `activity has an invalid schedule: ${parsed.reason}`,
+    };
+  }
+
   const previousBalance = Number(child.balance ?? 0);
   return {
     kind: "accept",
     title: activity.title,
     reward: activity.reward,
-    schedule: activity.schedule,
+    schedule: parsed.schedule,
     previousBalance,
   };
 }
@@ -167,10 +197,11 @@ export const claimActivity = onCall<
       throw new HttpsError(decision.code, decision.message);
     }
 
-    const tz =
-      (userSnap.exists
-        ? (userSnap.data() as { timezone?: string }).timezone
-        : undefined) ?? "Europe/Dublin";
+    const tz = resolveTimezone(
+      userSnap.exists
+        ? (userSnap.data() as { timezone?: unknown }).timezone
+        : undefined,
+    );
     const nextAt = nextOccurrence(decision.schedule, now, tz);
     const newBalance = decision.previousBalance + decision.reward;
 

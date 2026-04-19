@@ -14,6 +14,7 @@ import { getFirestore, Timestamp } from "../admin";
 import {
   nextOccurrence,
   parseSchedule,
+  resolveTimezone,
   type Schedule,
 } from "../lib/schedule";
 
@@ -151,7 +152,24 @@ export const updateActivity = onCall<
   if (typeof activityId !== "string" || activityId.length === 0) {
     throw new HttpsError("invalid-argument", "activityId is required");
   }
-  const patch = (data.patch ?? {}) as UpdateActivityRequest["patch"];
+  // `patch` must be a plain object (or omitted, which we treat as an
+  // empty patch and eventually return a noop). A non-object value
+  // (string, number, array, null) is always a client bug — without
+  // this guard `decideUpdateActivity` would silently treat it as {}
+  // and return { updated: true }, masking the caller's mistake.
+  const rawPatch = data.patch;
+  if (
+    rawPatch !== undefined &&
+    (rawPatch === null ||
+      typeof rawPatch !== "object" ||
+      Array.isArray(rawPatch))
+  ) {
+    throw new HttpsError(
+      "invalid-argument",
+      "patch must be a non-null object",
+    );
+  }
+  const patch = (rawPatch ?? {}) as UpdateActivityRequest["patch"];
 
   const db = getFirestore();
   const childRef = db.doc(`children/${childId}`);
@@ -198,10 +216,11 @@ export const updateActivity = onCall<
     if (decision.patch.reward !== undefined) writePatch.reward = decision.patch.reward;
     if (decision.patch.schedule !== undefined) {
       writePatch.schedule = decision.patch.schedule;
-      const tz =
-        (userSnap.exists
-          ? (userSnap.data() as { timezone?: string }).timezone
-          : undefined) ?? "Europe/Dublin";
+      const tz = resolveTimezone(
+        userSnap.exists
+          ? (userSnap.data() as { timezone?: unknown }).timezone
+          : undefined,
+      );
       const now = new Date();
       writePatch.nextClaimAt = Timestamp.fromDate(
         nextOccurrence(decision.patch.schedule, now, tz),

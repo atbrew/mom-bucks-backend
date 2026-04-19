@@ -57,7 +57,7 @@ export interface ChildBalanceUpdate {
  */
 export function computeNewBalance(
   previousBalance: number,
-  txn: Pick<TransactionDoc, "amount" | "type">,
+  txn: { amount: number; type: "LODGE" | "WITHDRAW" },
 ): ChildBalanceUpdate {
   const delta = txn.type === "LODGE" ? txn.amount : -txn.amount;
   const raw = previousBalance + delta;
@@ -120,7 +120,10 @@ export const onTransactionCreate = onDocumentCreated(
         return;
       }
       const previousBalance = Number(snap.get("balance") ?? 0);
-      const update = computeNewBalance(previousBalance, txn);
+      const update = computeNewBalance(previousBalance, {
+        amount: txn.amount,
+        type: txn.type as "LODGE" | "WITHDRAW",
+      });
       tx.update(childRef, {
         balance: update.newBalance,
         lastTxnAt: FieldValue.serverTimestamp(),

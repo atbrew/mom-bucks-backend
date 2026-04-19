@@ -7,6 +7,43 @@ export type ParseScheduleResult =
   | { ok: true; schedule: Schedule }
   | { ok: false; reason: string };
 
+/**
+ * Fallback IANA timezone used when a user's `timezone` field is
+ * missing, empty, not a string, or invalid. Matches the default
+ * documented in schema.md for `users/{uid}.timezone`.
+ */
+export const DEFAULT_TIMEZONE = "Europe/Dublin";
+
+/**
+ * Returns a valid IANA timezone string: either `raw` if it is a
+ * non-empty string that `Intl.DateTimeFormat` accepts, or
+ * `DEFAULT_TIMEZONE` otherwise. Never throws.
+ *
+ * Why: activity callables (`createActivity`, `updateActivity`,
+ * `claimActivity`) read the acting parent's timezone from
+ * `users/{uid}.timezone` and feed it straight into
+ * `nextOccurrence` → `Intl.DateTimeFormat`. A legacy or blank user
+ * doc, or a hand-edited bad IANA string, would otherwise crash the
+ * callable transaction with a RangeError — failing the parent's
+ * unrelated claim / schedule edit. Clamping to the default keeps
+ * the callable usable while the CLI / product can surface a "set
+ * your timezone" UI separately.
+ */
+export function resolveTimezone(raw: unknown): string {
+  if (typeof raw !== "string" || raw.length === 0) {
+    return DEFAULT_TIMEZONE;
+  }
+  try {
+    // Constructing the formatter is the cheapest way to validate:
+    // V8 throws `RangeError: Invalid time zone specified` for
+    // anything ICU doesn't recognise.
+    new Intl.DateTimeFormat("en-GB", { timeZone: raw });
+    return raw;
+  } catch {
+    return DEFAULT_TIMEZONE;
+  }
+}
+
 const ALLOWED_KEYS: Record<Schedule["kind"], ReadonlyArray<string>> = {
   DAILY: ["kind"],
   WEEKLY: ["kind", "dayOfWeek"],
