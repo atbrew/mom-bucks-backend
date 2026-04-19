@@ -1,11 +1,12 @@
 /**
  * claimActivity — callable, slice 4 of the activities refresh.
  *
- * Claims the reward for an activity, atomically writing an EARN
- * transaction, advancing `nextClaimAt` to the next occurrence, setting
- * `lastClaimedAt`, and bumping the child's main balance. All in one
- * Firestore transaction — the balance move and ledger row cannot
- * diverge.
+ * Claims the reward for an activity, atomically writing a
+ * `LODGE` transaction tagged `source: 'ACTIVITY'`, advancing
+ * `nextClaimAt` to the next occurrence, setting `lastClaimedAt`, and
+ * bumping the child's main balance. All in one Firestore transaction —
+ * the balance move and ledger row cannot diverge. `onTransactionCreate`
+ * sees the `source` tag and skips recompute so we don't double-apply.
  */
 
 import { onCall, HttpsError } from "firebase-functions/v2/https";
@@ -209,7 +210,8 @@ export const claimActivity = onCall<
 
     tx.create(txnRef, {
       amount: decision.reward,
-      type: "EARN",
+      type: "LODGE",
+      source: "ACTIVITY",
       description: decision.title,
       createdByUid: callerUid,
       createdAt: FieldValue.serverTimestamp(),

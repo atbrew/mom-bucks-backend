@@ -10,10 +10,19 @@
  * optimistic locking.
  *
  * Behaviour:
- *   - `type === 'LODGE'`   → balance += amount
+ *   - `type === 'LODGE'`    → balance += amount
  *   - `type === 'WITHDRAW'` → balance -= amount (clamped at 0)
  *   - `lastTxnAt` is set to the server timestamp
  *   - `version` is bumped so clients can detect stale reads
+ *
+ * Skip rule: if a `LODGE` row carries a `source` tag of `'ACTIVITY'`
+ * or `'VAULT_UNLOCK'`, the trigger returns without touching the
+ * balance. Those rows are written by `claimActivity` and `unlockVault`
+ * callables, which already applied the balance bump atomically in the
+ * same Firestore transaction that wrote the ledger row. The `source`
+ * tag is an audit trail (banking model — LODGE is always a credit, the
+ * tag records where it came from) and doubles as the trigger's
+ * "don't re-apply" signal.
  *
  * Clamping on would-go-negative is defense-in-depth. The primary
  * guard against overspend lives in `firestore.rules`, which denies
@@ -37,9 +46,12 @@ import { onDocumentCreated } from "firebase-functions/v2/firestore";
 import { logger } from "firebase-functions";
 import { getFirestore, FieldValue } from "../admin";
 
+export type TransactionSource = "ACTIVITY" | "VAULT_UNLOCK";
+
 export interface TransactionDoc {
   amount: number; // integer cents
-  type: "LODGE" | "WITHDRAW" | "EARN";
+  type: "LODGE" | "WITHDRAW";
+  source?: TransactionSource;
   description?: string;
   createdByUid?: string;
 }
@@ -91,19 +103,24 @@ export const onTransactionCreate = onDocumentCreated(
       return;
     }
 
-    if (txn.type === "EARN") {
-      // claimActivity and vault callables apply the balance + version
-      // bump atomically in the same transaction that writes the EARN
-      // row, so the trigger has nothing left to do.
-      return;
-    }
-
     if (txn.type !== "LODGE" && txn.type !== "WITHDRAW") {
       logger.warn("[onTransactionCreate] invalid type; skipping", {
         childId,
         txnId,
         type: txn.type,
       });
+      return;
+    }
+
+    if (
+      txn.type === "LODGE" &&
+      (txn.source === "ACTIVITY" || txn.source === "VAULT_UNLOCK")
+    ) {
+      // Server-written LODGE (claimActivity / unlockVault): the callable
+      // applied the balance + version bump in the same Firestore
+      // transaction that wrote this row, so the trigger has nothing
+      // left to do. `source` is the banking-style audit tag; its
+      // presence signals "don't re-apply."
       return;
     }
 
