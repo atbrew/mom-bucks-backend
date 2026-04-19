@@ -108,9 +108,10 @@ def configure_vault(
     """Write the child.vault nested map via the Admin SDK.
 
     A `configureVault` callable is deferred (design §2); this command
-    fills the gap for the CLI until that exists. Overwrites any
-    previous config atomically. Balance is reset to 0 and the vault is
-    left in the saving state (`unlockedAt = null`).
+    fills the gap for the CLI until that exists. Target, interest, and
+    matching are overwritten atomically. Existing `balance` and
+    `unlockedAt` are preserved — reconfiguring a vault must never wipe
+    savings the child has already accumulated.
     """
     config: ProjectConfig = ctx.obj["config"]
     target_cents = _euros_to_cents(target)
@@ -122,17 +123,6 @@ def configure_vault(
         raise click.UsageError("--match-rate must be >= 0.")
 
     now = datetime.now(timezone.utc)
-    vault_map: dict[str, Any] = {
-        "balance": 0,
-        "target": target_cents,
-        "unlockedAt": None,
-        "interest": (
-            None
-            if weekly_rate is None
-            else {"weeklyRate": weekly_rate, "lastAccrualWrite": now}
-        ),
-        "matching": None if match_rate is None else {"rate": match_rate},
-    }
 
     admin = _admin_client(config)
     try:
@@ -140,6 +130,20 @@ def configure_vault(
         snap = ref.get()
         if not snap.exists:
             raise click.ClickException(f"Child {child_id} not found.")
+        existing = (snap.to_dict() or {}).get("vault") or {}
+        existing_balance = int(existing.get("balance", 0) or 0)
+        existing_unlocked_at = existing.get("unlockedAt")
+        vault_map: dict[str, Any] = {
+            "balance": existing_balance,
+            "target": target_cents,
+            "unlockedAt": existing_unlocked_at,
+            "interest": (
+                None
+                if weekly_rate is None
+                else {"weeklyRate": weekly_rate, "lastAccrualWrite": now}
+            ),
+            "matching": None if match_rate is None else {"rate": match_rate},
+        }
         ref.update({"vault": vault_map})
     finally:
         admin.close()

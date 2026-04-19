@@ -159,12 +159,14 @@ def _patched_admin(mock_admin: MagicMock):
 
 def test_configure_writes_vault_map_with_interest_and_matching():
     """With both `--weekly-rate` and `--match-rate`, the vault map must
-    contain full `interest` and `matching` sub-objects. `balance=0`
-    and `unlockedAt=None` are the fresh-vault sentinel values."""
+    contain full `interest` and `matching` sub-objects. On a fresh
+    child (no pre-existing vault) `balance=0` and `unlockedAt=None`
+    are the sentinel values."""
     runner = CliRunner()
     mock_ref = MagicMock()
     mock_snap = MagicMock()
     mock_snap.exists = True
+    mock_snap.to_dict.return_value = {"name": "Sam"}
     mock_ref.get.return_value = mock_snap
     mock_admin = MagicMock()
     mock_admin.db.document.return_value = mock_ref
@@ -205,6 +207,7 @@ def test_configure_omits_interest_and_matching_when_rates_absent():
     mock_ref = MagicMock()
     mock_snap = MagicMock()
     mock_snap.exists = True
+    mock_snap.to_dict.return_value = {"name": "Sam"}
     mock_ref.get.return_value = mock_snap
     mock_admin = MagicMock()
     mock_admin.db.document.return_value = mock_ref
@@ -227,6 +230,52 @@ def test_configure_omits_interest_and_matching_when_rates_absent():
     assert vault["target"] == 2500
     assert vault["interest"] is None
     assert vault["matching"] is None
+
+
+def test_configure_preserves_existing_balance_and_unlocked_at():
+    """Reconfiguring a vault (changing target / interest / matching)
+    must NOT wipe the balance the child has already saved. Likewise,
+    an already-unlocked vault stays unlocked — the configure path is
+    for knob-twiddling, not lifecycle state machine."""
+    runner = CliRunner()
+    existing_unlock = datetime(2026, 1, 1, tzinfo=timezone.utc)
+    mock_ref = MagicMock()
+    mock_snap = MagicMock()
+    mock_snap.exists = True
+    mock_snap.to_dict.return_value = {
+        "name": "Sam",
+        "vault": {
+            "balance": 1234,
+            "target": 5000,
+            "unlockedAt": existing_unlock,
+            "interest": None,
+            "matching": None,
+        },
+    }
+    mock_ref.get.return_value = mock_snap
+    mock_admin = MagicMock()
+    mock_admin.db.document.return_value = mock_ref
+
+    with _patched_admin(mock_admin):
+        result = runner.invoke(main, [
+            "--project", "emu",
+            "vault",
+            "--email", "p@x.com",
+            "--password", "pw",
+            "configure",
+            "--child-id", "child-1",
+            "--target", "100.00",
+            "--weekly-rate", "0.02",
+        ])
+
+    assert result.exit_code == 0, result.output
+    args, _ = mock_ref.update.call_args
+    (payload,) = args
+    vault = payload["vault"]
+    assert vault["balance"] == 1234
+    assert vault["unlockedAt"] == existing_unlock
+    assert vault["target"] == 10000
+    assert vault["interest"]["weeklyRate"] == 0.02
 
 
 def test_configure_rejects_missing_child():
