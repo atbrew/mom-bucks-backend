@@ -1,12 +1,15 @@
 /**
  * unlockVault — mutating callable, slice 5.
  *
- * Per design §4.7. Releases a filled vault: appends a vault UNLOCK
- * row, appends a main-ledger EARN row, bumps `child.balance` by the
- * released amount, zeros `vault.balance`, clears `vault.unlockedAt`,
- * and resets `vault.interest.lastAccrualWrite` to `now` (fresh cycle)
- * when interest is configured. Config (`target`, `interest`,
- * `matching`) is preserved across the unlock.
+ * Per design §4.7. Releases a filled vault: appends a vault `UNLOCK`
+ * row, appends a main-ledger `LODGE` row tagged `source:
+ * 'VAULT_UNLOCK'`, bumps `child.balance` by the released amount, zeros
+ * `vault.balance`, clears `vault.unlockedAt`, and resets
+ * `vault.interest.lastAccrualWrite` to `now` (fresh cycle) when
+ * interest is configured. Config (`target`, `interest`, `matching`) is
+ * preserved across the unlock. `onTransactionCreate` sees the `source`
+ * tag on the LODGE row and skips recompute — the balance bump is
+ * already applied by this transaction.
  */
 
 import { onCall, HttpsError } from "firebase-functions/v2/https";
@@ -111,7 +114,8 @@ export const unlockVault = onCall<
       createdAt: FieldValue.serverTimestamp(),
     });
     tx.create(mainTxnRef, {
-      type: "EARN",
+      type: "LODGE",
+      source: "VAULT_UNLOCK",
       amount: released,
       description: "Vault unlocked",
       createdByUid: callerUid,
