@@ -8,7 +8,7 @@
 
 import { onCall, HttpsError } from "firebase-functions/v2/https";
 import { logger } from "firebase-functions";
-import { getFirestore } from "../admin";
+import { getFirestore, FieldValue } from "../admin";
 
 // ─── Types ──────────────────────────────────────────────────────────
 
@@ -118,7 +118,10 @@ export const deleteActivity = onCall<
 
     tx.delete(activityRef);
     if (decision.clearAllowancePointer) {
-      tx.update(childRef, { allowanceId: null });
+      tx.update(childRef, {
+        allowanceId: null,
+        version: FieldValue.increment(1),
+      });
     }
 
     logger.info("[deleteActivity] deleted", {

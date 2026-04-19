@@ -170,7 +170,10 @@ export const createActivity = onCall<
     });
 
     if (decision.type === "ALLOWANCE") {
-      tx.update(childRef, { allowanceId: activityRef.id });
+      tx.update(childRef, {
+        allowanceId: activityRef.id,
+        version: FieldValue.increment(1),
+      });
     }
 
     logger.info("[createActivity] created", {
