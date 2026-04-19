@@ -34,12 +34,12 @@ def _require_admin_sdk(config: ProjectConfig) -> AdminClient:
     return AdminClient(config.project_id, sa_path)
 
 
-def _wipe_firestore(admin, batch_size: int = 200) -> int:
+def _wipe_firestore(admin) -> int:
     """Recursively delete every root collection. Returns #collections wiped."""
     wiped = 0
     for col in admin.db.collections():
         console.print(f"  Firestore: recursive delete [bold]{col.id}[/bold]…")
-        admin.db.recursive_delete(col, batch_size=batch_size)
+        admin.db.recursive_delete(col)
         wiped += 1
     return wiped
 
@@ -84,21 +84,20 @@ def _wipe_storage(project_id: str) -> int:
         console.print(f"  [yellow]Storage: bucket unavailable ({e})[/yellow]")
         return 0
 
-    deleted = 0
     try:
-        for blob in bucket.list_blobs(prefix="children/"):
-            try:
-                blob.delete()
-                deleted += 1
-            except Exception as e:
-                console.print(
-                    f"  [yellow]Storage: failed to delete "
-                    f"{blob.name}: {e}[/yellow]"
-                )
+        blobs = list(bucket.list_blobs(prefix="children/"))
     except Exception as e:
         # Emulator may 404 on list when the bucket is empty / never used.
         console.print(f"  [yellow]Storage: list failed ({e})[/yellow]")
-    return deleted
+        return 0
+    if not blobs:
+        return 0
+    try:
+        bucket.delete_blobs(blobs)
+    except Exception as e:
+        console.print(f"  [yellow]Storage: batch delete failed ({e})[/yellow]")
+        return 0
+    return len(blobs)
 
 
 @click.group("admin")
@@ -120,20 +119,30 @@ def reset(ctx: click.Context, yes_prod: bool) -> None:
 
     Used after a breaking schema change to wipe the slate before
     re-seeding. Safe on the emulator (`make clean` already does this).
-    On `--project dev` it's a single-step confirmation; on `--project
-    prod` it requires both a typed-confirmation AND the
+    On `--project dev` it's a single-step typed confirmation; on
+    `--project prod` it requires both a typed-confirmation AND the
     `--yes-i-know-this-is-prod` flag.
     """
     config: ProjectConfig = ctx.obj["config"]
     alias: str = ctx.obj["project_alias"]
 
-    if alias == "prod":
+    if alias == "emu":
+        pass
+    elif alias == "prod":
         if not yes_prod:
             raise click.ClickException(
                 "Refusing to wipe prod without --yes-i-know-this-is-prod.",
             )
         typed = click.prompt(
             "Type 'reset' (without quotes) to wipe mom-bucks PROD",
+            default="",
+            show_default=False,
+        )
+        if typed.strip() != "reset":
+            raise click.ClickException("Aborted — confirmation text mismatch.")
+    else:
+        typed = click.prompt(
+            f"Type 'reset' (without quotes) to wipe mom-bucks {alias.upper()}",
             default="",
             show_default=False,
         )

@@ -26,6 +26,7 @@ _DOW_MAP = {
     "sun": 0, "mon": 1, "tue": 2, "wed": 3,
     "thu": 4, "fri": 5, "sat": 6,
 }
+_REV_DOW_MAP = {v: k for k, v in _DOW_MAP.items()}
 
 
 def parse_schedule(shorthand: str) -> dict[str, Any]:
@@ -222,8 +223,7 @@ def _format_schedule(schedule: dict[str, Any] | None) -> str:
         return "daily"
     if kind == "WEEKLY":
         dow = schedule.get("dayOfWeek")
-        reverse = {v: k for k, v in _DOW_MAP.items()}
-        return f"weekly:{reverse.get(dow, dow)}"
+        return f"weekly:{_REV_DOW_MAP.get(dow, dow)}"
     if kind == "MONTHLY":
         return f"monthly:{schedule.get('dayOfMonth')}"
     return str(schedule)
