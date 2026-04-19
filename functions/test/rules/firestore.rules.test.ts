@@ -1296,6 +1296,119 @@ describe("children/{childId}/transactions/{txnId}", () => {
       );
     });
   });
+
+  // ─── `source` field is server-only ───────────────────────────────
+  //
+  // `source` is the audit tag written by claimActivity / unlockVault /
+  // depositToVault via the Admin SDK. Its presence signals to
+  // `onTransactionCreate` that the callable already applied the
+  // balance delta in-transaction and the trigger should skip. If a
+  // client could mint a LODGE with `source: 'ACTIVITY'` on the client
+  // path, the trigger would skip and the balance would never be
+  // credited — effectively a free LODGE that goes nowhere but clears
+  // later guards. Block the field on client-path creates, and pin it
+  // immutable on update so the sibling ledger-core guarantees hold.
+  describe("source field is server-only", () => {
+    async function seedSourcedTransaction(
+      childId: string,
+      txnId: string,
+    ): Promise<void> {
+      await env.withSecurityRulesDisabled(async (ctx) => {
+        await setDoc(
+          doc(ctx.firestore(), `children/${childId}/transactions/${txnId}`),
+          {
+            amount: 500,
+            type: "LODGE",
+            source: "ACTIVITY",
+            description: "chore",
+            createdByUid: "alice",
+            createdAt: new Date("2025-06-01T14:22:00Z"),
+          },
+        );
+      });
+    }
+
+    it("denies a client-path create that sets source: 'ACTIVITY'", async () => {
+      await seedChild("sam", ["alice"]);
+      const alice = env.authenticatedContext("alice").firestore();
+      await assertFails(
+        setDoc(doc(alice, "children/sam/transactions/t1"), {
+          amount: 500,
+          type: "LODGE",
+          source: "ACTIVITY",
+          description: "free money",
+          createdByUid: "alice",
+          createdAt: serverTimestamp(),
+        }),
+      );
+    });
+
+    it("denies a client-path create that sets source: 'VAULT_UNLOCK'", async () => {
+      await seedChild("sam", ["alice"]);
+      const alice = env.authenticatedContext("alice").firestore();
+      await assertFails(
+        setDoc(doc(alice, "children/sam/transactions/t1"), {
+          amount: 500,
+          type: "LODGE",
+          source: "VAULT_UNLOCK",
+          description: "free money",
+          createdByUid: "alice",
+          createdAt: serverTimestamp(),
+        }),
+      );
+    });
+
+    it("denies a client-path create that sets source: 'VAULT_DEPOSIT'", async () => {
+      await seedChild("sam", ["alice"], { balance: 1000 });
+      const alice = env.authenticatedContext("alice").firestore();
+      await assertFails(
+        setDoc(doc(alice, "children/sam/transactions/t1"), {
+          amount: 500,
+          type: "WITHDRAW",
+          source: "VAULT_DEPOSIT",
+          description: "skip the trigger",
+          createdByUid: "alice",
+          createdAt: serverTimestamp(),
+        }),
+      );
+    });
+
+    it("denies an update that changes source on a server-written row", async () => {
+      await seedChild("sam", ["alice"]);
+      await seedSourcedTransaction("sam", "t1");
+      const alice = env.authenticatedContext("alice").firestore();
+      await assertFails(
+        updateDoc(doc(alice, "children/sam/transactions/t1"), {
+          source: "VAULT_UNLOCK",
+        }),
+      );
+    });
+
+    it("denies an update that strips source from a server-written row", async () => {
+      await seedChild("sam", ["alice"]);
+      await seedSourcedTransaction("sam", "t1");
+      const alice = env.authenticatedContext("alice").firestore();
+      await assertFails(
+        updateDoc(doc(alice, "children/sam/transactions/t1"), {
+          source: null,
+        }),
+      );
+    });
+
+    it("allows a client-path create with no source field (parent-initiated LODGE)", async () => {
+      await seedChild("sam", ["alice"]);
+      const alice = env.authenticatedContext("alice").firestore();
+      await assertSucceeds(
+        setDoc(doc(alice, "children/sam/transactions/t1"), {
+          amount: 500,
+          type: "LODGE",
+          description: "pocket money",
+          createdByUid: "alice",
+          createdAt: serverTimestamp(),
+        }),
+      );
+    });
+  });
 });
 
 // ─── children/{childId}/activities/{activityId} ─────────────────────
@@ -1305,7 +1418,7 @@ describe("children/{childId}/transactions/{txnId}", () => {
 // (createActivity / updateActivity / deleteActivity / claimActivity).
 // Direct client writes are denied wholesale — the callables have to
 // pair every activity-doc write with a sibling write (allowanceId
-// pointer, main ledger EARN row, nextClaimAt recompute) that rules
+// pointer, main ledger LODGE row, nextClaimAt recompute) that rules
 // can't compose atomically. Reads remain any-parent.
 
 async function seedActivity(

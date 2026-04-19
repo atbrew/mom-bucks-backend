@@ -101,7 +101,7 @@ service cloud.firestore {
     // changing semantics. PR #32 review feedback.
     function txnCoreUnchanged() {
       return !(request.resource.data.diff(resource.data).affectedKeys()
-                .hasAny(['amount', 'type', 'createdByUid']));
+                .hasAny(['amount', 'type', 'createdByUid', 'source']));
     }
 
     // True iff the incoming `createdAt` is a server-resolved
@@ -344,9 +344,17 @@ service cloud.firestore {
       match /transactions/{txnId} {
         allow read, delete: if isChildParent(childId);
 
+        // `source` is a server-only audit tag (ACTIVITY /
+        // VAULT_UNLOCK / VAULT_DEPOSIT) that doubles as the
+        // `onTransactionCreate` "don't re-apply" signal. Client-path
+        // writes MUST NOT set it — the callables that need it run
+        // through the Admin SDK and bypass rules. Forbidding the
+        // field here prevents a parent from minting a free LODGE by
+        // tagging it as though a callable had written it.
         allow create: if isChildParent(childId)
                       && request.resource.data.amount is number
                       && request.resource.data.amount >= 0
+                      && !('source' in request.resource.data)
                       && (
                            request.resource.data.type != 'WITHDRAW'
                            || request.resource.data.amount <=
