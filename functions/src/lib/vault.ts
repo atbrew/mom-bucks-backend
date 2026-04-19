@@ -60,11 +60,11 @@ export function computeInterestPayout(params: {
   if (!(balance > 0)) return 0;
   const room = target - balance;
   if (room <= 0) return 0;
-  // Single-division form keeps the arithmetic in one float op rather
-  // than two separate (elapsedMs/DAY) and (days/7) divisions, which
-  // reduces rounding error at the extremes (very large balances or
-  // very long intervals).
-  const accrued = (balance * weeklyRate * elapsedMs) / MS_PER_WEEK;
+  // Apply the /MS_PER_WEEK division first so the running product
+  // never blows past Number.MAX_SAFE_INTEGER. Still one division,
+  // still bounded rounding — but a very large balance × a long
+  // interval won't silently lose precision on the intermediate.
+  const accrued = balance * weeklyRate * (elapsedMs / MS_PER_WEEK);
   return Math.max(0, Math.floor(Math.min(accrued, room)));
 }
 
